@@ -1,24 +1,27 @@
-r"""Build a flow rate test with concentric top surfaces printed from the outside in.
+r"""Build a flow rate test whose top surfaces push extra plastic into a ring.
 
-Each patch is a round pad with its own flow ratio and a label tab in front:
+Each patch is a round pad with its own flow ratio and a label tab in front.
+Its top is an Archimedean spiral printed in two passes, the way OrcaSlicer's
+flow test does it:
 
-        _____             _____             _____
-      /  ___  \         /  ___  \         /  ___  \       concentric circles,
-     |  ( o )  |       |  ( o )  |       |  ( o )  |      printed outside -> in
-      \_______/         \_______/         \_______/
-     |__0.931__|       |__0.980__|       |__1.029__|      raised flow ratio
+        _____         1. the outer half, from the edge in to the ring
+      /  ___  \       2. hop to the centre
+     |  ( o )  |      3. the inner half, from the centre out to the ring
+      \_______/
+     |__0.980__|      raised flow ratio
 
-Round pads give round rings: with no corners for the nozzle to slow into and
+Both passes push their extra plastic ahead of the nozzle, so it collects where
+they meet: too much flow shows as a raised ring, too little as a groove or gaps
+there. Ending at a ring rather than at the centre spreads the excess out, so it
+doesn't pile up into a blob even at low flow. The ring sits at 1/sqrt(2) of
+the radius, which puts half the surface on each side.
+
+Round pads give a round spiral: with no corners for the nozzle to slow into and
 speed out of, the result doesn't depend on pressure advance being tuned yet.
 
-Printing the rings from the edge inwards pushes any extra plastic towards the
-middle, so over-extrusion shows up as a ridge or blob in the centre and
-under-extrusion as gaps there. The patch with the cleanest centre wins.
-
-QIDI Studio picks the ring order itself (a square pad came out inside-out, a
-round one outside-in) and can't be told which, so the test is sliced with QIDI
-Studio's command-line slicer and any top surface that runs inside-out is
-reversed in the G-code.
+QIDI Studio prints the spiral in one go (edge to centre, or the other way), so
+the test is sliced with QIDI Studio's command-line slicer and each pad's spiral
+is split and reordered in the G-code.
 """
 import math
 import re
@@ -39,6 +42,7 @@ TEXT_RAISE = 0.6    # label text height above the tab
 GAP = 5.0           # space between samples
 
 TOP_MARK = "; FEATURE: Top surface"
+SPLIT = 1 / math.sqrt(2)   # meeting ring, as a share of the pad radius: half the surface on each side
 
 
 # ------------------------------------------------------------------ settings
@@ -120,7 +124,7 @@ def build_objects(base, offs):
             "offset": (dx, dy),
             "settings": {
                 "print_flow_ratio": num(1 + o / 100.0),
-                "top_surface_pattern": "concentric",
+                "top_surface_pattern": "archimedeanchords",
                 "top_shell_layers": "5",
                 "bottom_shell_layers": "3",
                 "ironing_type": "no ironing",
@@ -151,20 +155,32 @@ def _fmt_xy(v):
     return ("%.3f" % v).rstrip("0").rstrip(".")
 
 
-class _State:
-    def __init__(self):
-        self.x = self.y = None
-        self.f = None
-        self.accel = None
+def _config(gcode, key, default):
+    """A value from the CONFIG_BLOCK QIDI Studio writes at the end of its G-code (first extruder)."""
+    m = re.search(r"^; %s = (.*)$" % re.escape(key), gcode, re.M)
+    if not m:
+        return default
+    value = m.group(1).split(",")[0].strip().strip('"')
+    return default if value in ("", "nil") else value
 
 
-def _reverse_block(block, state, out):
-    """Reverse one top-surface block. `block` excludes the FEATURE line; `out` holds the lines
-    already written, whose last travel into the block gets redirected to the new start."""
-    start = (state.x, state.y)
-    segs = []                         # (from, to, e, f, accel, width)
-    width = None
-    pos, f, accel = start, state.f, state.accel
+class _Seg:
+    """One move: from a to b, extruding e, with the feed rate, acceleration and line width it used."""
+    __slots__ = ("a", "b", "e", "f", "accel", "width")
+
+    def __init__(self, a, b, e, f, accel, width):
+        self.a, self.b, self.e, self.f, self.accel, self.width = a, b, e, f, accel, width
+
+    def reversed(self):
+        return _Seg(self.b, self.a, self.e, self.f, self.accel, self.width)
+
+    def length(self):
+        return math.hypot(self.b[0] - self.a[0], self.b[1] - self.a[1])
+
+
+def _parse_block(block, start, f, accel):
+    """Moves of a top-surface block. Returns (segments, final feed rate, final acceleration line)."""
+    segs, pos, width = [], start, None
     for line in block:
         if line.startswith("; LINE_WIDTH:"):
             width = line
@@ -177,18 +193,36 @@ def _reverse_block(block, state, out):
             if "F" in w:
                 f = w["F"]
             if "X" not in w and "Y" not in w:
-                continue              # "G1 F..." only
+                continue
             to = (float(w.get("X", pos[0])), float(w.get("Y", pos[1])))
-            segs.append((pos, to, float(w.get("E", 0) or 0), f, accel, width))
+            segs.append(_Seg(pos, to, float(w.get("E", 0) or 0), f, accel, width))
             pos = to
         else:
             raise RuntimeError("Unexpected line in a top surface: %r" % line)
-    if not segs or start[0] is None:
-        return None
-    end = pos
+    return segs, f, accel
 
-    # Redirect the slicer's travel into the block so it lands on the new start point.
-    # (out[-1] is this block's own FEATURE line.)
+
+def _emit(segs, out, cur):
+    """Write segments, re-stating line width, acceleration and feed rate whenever they change.
+    `cur` is a dict of what's currently in effect; it's updated."""
+    for s in segs:
+        if s.width and s.width != cur.get("width"):
+            out.append(s.width)
+            cur["width"] = s.width
+        if s.accel and s.accel != cur.get("accel"):
+            out.append(s.accel)
+            cur["accel"] = s.accel
+        if s.f and s.f != cur.get("f"):
+            out.append("G1 F" + s.f)
+            cur["f"] = s.f
+        if s.e > 0:
+            out.append("G1 X%s Y%s E%s" % (_fmt_xy(s.b[0]), _fmt_xy(s.b[1]), num(s.e)))
+        else:
+            out.append("G1 X%s Y%s" % (_fmt_xy(s.b[0]), _fmt_xy(s.b[1])))
+
+
+def _redirect_travel_in(out, target):
+    """Point the slicer's (z-hopped) travel into the block at `target`. out[-1] is the FEATURE line."""
     last = len(out) - 2 if out and out[-1].startswith(TOP_MARK) else len(out) - 1
     for i in range(last, -1, -1):
         line = out[i]
@@ -196,46 +230,86 @@ def _reverse_block(block, state, out):
             w = _words(line)
             if "X" in w or "Y" in w:
                 if float(w.get("E", 0) or 0) > 0:
-                    out.append("G1 X%s Y%s F12000" % (_fmt_xy(end[0]), _fmt_xy(end[1])))
+                    out.insert(last + 1, "G1 X%s Y%s F12000" % (_fmt_xy(target[0]), _fmt_xy(target[1])))
                 else:
                     words = [t for t in line.partition(";")[0].split() if t[0] not in "XY"]
-                    out[i] = " ".join([words[0], "X" + _fmt_xy(end[0]), "Y" + _fmt_xy(end[1])] + words[1:])
-                break
+                    out[i] = " ".join([words[0], "X" + _fmt_xy(target[0]), "Y" + _fmt_xy(target[1])] + words[1:])
+                return
         elif line.startswith(("G2 ", "G3 ")) and ("X" in _words(line) or "Y" in _words(line)):
             raise RuntimeError("Can't redirect an arc travel into a top surface")
         elif line.startswith(("; FEATURE:", "; CHANGE_LAYER")):
-            out.append("G1 X%s Y%s F12000" % (_fmt_xy(end[0]), _fmt_xy(end[1])))
             break
-
-    cur_w = cur_a = cur_f = None
-    for frm, to, e, seg_f, seg_a, seg_w in reversed(segs):
-        if seg_w and seg_w != cur_w:
-            out.append(seg_w)
-            cur_w = seg_w
-        if seg_a and seg_a != cur_a:
-            out.append(seg_a)
-            cur_a = seg_a
-        if seg_f and seg_f != cur_f:
-            out.append("G1 F" + seg_f)
-            cur_f = seg_f
-        if e > 0:
-            out.append("G1 X%s Y%s E%s" % (_fmt_xy(frm[0]), _fmt_xy(frm[1]), num(e)))
-        else:
-            out.append("G1 X%s Y%s" % (_fmt_xy(frm[0]), _fmt_xy(frm[1])))
-    # Leave the modal state as the original block did.
-    if f and f != cur_f:
-        out.append("G1 F" + f)
-    if accel and accel != cur_a:
-        out.append(accel)
-    state.f, state.accel = f, accel
-    state.x, state.y = start
-    # The wipe that follows should run back over the last printed line, which is now
-    # the start of the original path.
-    return [(frm, to, e) for frm, to, e, _, _, _ in segs], end
+    out.insert(last + 1, "G1 X%s Y%s F12000" % (_fmt_xy(target[0]), _fmt_xy(target[1])))
 
 
-def _rewrite_wipe(lines, i, path, out, state):
-    """Rewrite the wipe moves after a reversed block (lines[i] is "; WIPE_START")."""
+def _split_at_radius(seg, c, r):
+    """Split a segment that crosses the circle of radius r around c. Returns (before, after)."""
+    ax, ay = seg.a[0] - c[0], seg.a[1] - c[1]
+    dx, dy = seg.b[0] - seg.a[0], seg.b[1] - seg.a[1]
+    qa, qb, qc = dx * dx + dy * dy, 2 * (ax * dx + ay * dy), ax * ax + ay * ay - r * r
+    disc = max(0.0, qb * qb - 4 * qa * qc)
+    roots = [t for t in ((-qb - math.sqrt(disc)) / (2 * qa), (-qb + math.sqrt(disc)) / (2 * qa)) if 0 <= t <= 1]
+    t = min(roots) if roots else 0.5
+    p = (seg.a[0] + dx * t, seg.a[1] + dy * t)
+    return (_Seg(seg.a, p, seg.e * t, seg.f, seg.accel, seg.width),
+            _Seg(p, seg.b, seg.e * (1 - t), seg.f, seg.accel, seg.width))
+
+
+def _spiral_plan(segs, min_size):
+    """If segs are one unbroken pad-sized spiral, return (outer, inner, centre): outer runs from the
+    edge in to the meeting ring, inner from the centre out to it. Otherwise None."""
+    if not segs:
+        return None
+    xs = [p[0] for s in segs for p in (s.a, s.b) if s.e > 0]
+    ys = [p[1] for s in segs for p in (s.a, s.b) if s.e > 0]
+    if not xs or max(xs) - min(xs) < min_size:
+        return None
+    c = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+
+    def radius(p):
+        return math.hypot(p[0] - c[0], p[1] - c[1])
+
+    # The spiral is the longest unbroken extrusion. QIDI Studio sometimes prints a few
+    # tiny clipped stubs at the very edge first; those are kept and printed first too.
+    runs, cur = [], []
+    for s in segs:
+        if s.e > 0:
+            cur.append(s)
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    main = max(runs, key=lambda run: sum(s.length() for s in run))
+    total = sum(s.length() for s in segs if s.e > 0)
+    if sum(s.length() for s in main) < 0.95 * total:
+        return None              # not one spiral (label tabs, digits)
+    r_max = max(radius(p) for s in main for p in (s.a, s.b))
+    r_split = SPLIT * r_max
+    stubs = [s for s in segs if not any(s is m for m in main)]
+    if any(s.e > 0 and min(radius(s.a), radius(s.b)) < r_split for s in stubs):
+        return None
+    while stubs and stubs[-1].e <= 0:
+        stubs.pop()              # the travel into the spiral is re-made below
+    if radius(main[0].a) < radius(main[-1].b):   # spiral runs outwards: make it run inwards
+        main = [s.reversed() for s in reversed(main)]
+    for k, s in enumerate(main):
+        if radius(s.a) >= r_split > radius(s.b):
+            before, after = _split_at_radius(s, c, r_split)
+            outer = main[:k] + [before]
+            if stubs:
+                hop = _Seg(stubs[-1].b, outer[0].a, 0.0, "30000", stubs[-1].accel, stubs[-1].width)
+                outer = stubs + [hop] + outer
+            inner = [x.reversed() for x in reversed([after] + main[k + 1:])]
+            return outer, inner, c
+    return None
+
+
+def _rewrite_wipe(lines, i, trail, end_before, out, state):
+    """Rewrite the wipe that follows a rewritten block (lines[i] is just after "; WIPE_START").
+
+    The nozzle now stops somewhere else, so the wipe runs back along `trail` (the
+    segments printed last, in print order) for the original wipe's length."""
     j = i
     moves, others = [], []
     while j < len(lines) and not lines[j].startswith("; WIPE_END"):
@@ -249,26 +323,23 @@ def _rewrite_wipe(lines, i, path, out, state):
     if not moves:
         return i
     total_e = sum(m[2] for m in moves)
-    # Original wipe length, measured from where the block used to end.
-    length, px, py = 0.0, state.end[0], state.end[1]
+    length, px, py = 0.0, end_before[0], end_before[1]
     for x, y, _ in moves:
         length += math.hypot(x - px, y - py)
         px, py = x, y
-    # Walk the original path forwards from its start (now the last line printed),
-    # for the same distance, stopping at the first travel.
     pts, walked = [], 0.0
-    for frm, to, e in path:
-        if e <= 0:
+    for s in reversed(trail):
+        if s.e <= 0:
             break
-        if frm == to:
+        seg = s.length()
+        if seg <= 0:
             continue
-        seg = math.hypot(to[0] - frm[0], to[1] - frm[1])
         if walked + seg >= length:
             t = (length - walked) / seg
-            pts.append((frm[0] + (to[0] - frm[0]) * t, frm[1] + (to[1] - frm[1]) * t, length - walked))
+            pts.append((s.b[0] + (s.a[0] - s.b[0]) * t, s.b[1] + (s.a[1] - s.b[1]) * t, length - walked))
             walked = length
             break
-        pts.append((to[0], to[1], seg))
+        pts.append((s.a[0], s.a[1], seg))
         walked += seg
     out.extend(others)
     if walked <= 1e-6:
@@ -276,56 +347,26 @@ def _rewrite_wipe(lines, i, path, out, state):
     else:
         for x, y, d in pts:
             out.append("G1 X%s Y%s E%s" % (_fmt_xy(x), _fmt_xy(y), num(total_e * d / walked)))
-        state.x, state.y = pts[-1][0], pts[-1][1]
+        state["pos"] = (pts[-1][0], pts[-1][1])
     return j
 
 
-def _extrusions(block, start):
-    """[(from, to)] of the extruding moves in a top-surface block that starts at `start`."""
-    pos, found = start, []
-    for line in block:
-        if _MOVE.match(line):
-            w = _words(line)
-            if "X" not in w and "Y" not in w:
-                continue
-            to = (float(w.get("X", pos[0])), float(w.get("Y", pos[1])))
-            if float(w.get("E", 0) or 0) > 0:
-                found.append((pos, to))
-            pos = to
-    return found
+def split_spirals(gcode, min_size=PAD * 0.9):
+    """Reorder each pad's Archimedean top surface the way Orca does it: the outer half from the
+    edge inwards, then (after a retract and hop to the middle) the inner half from the centre
+    outwards, so both meet at a ring and any extra plastic piles up there.
 
+    Returns (new_gcode, number of surfaces reordered)."""
+    retract = float(_config(gcode, "filament_retraction_length", None) or _config(gcode, "retraction_length", "0.8"))
+    retract_f = float(_config(gcode, "retraction_speed", "30")) * 60
+    deretract_f = float(_config(gcode, "deretraction_speed", "0")) * 60 or retract_f
+    hop = float(_config(gcode, "z_hop", "0.4"))
+    travel_f = min(float(_config(gcode, "travel_speed", "300")) * 60, 30000)
 
-def direction(block, start):
-    """"in" if a concentric block runs from the outside in, "out" if inside out, None if unclear.
-
-    QIDI Studio chains the rings from wherever the nozzle is, so either can happen
-    (a square pad came out inside-out, a round one outside-in)."""
-    moves = _extrusions(block, start)
-    if not moves or start[0] is None:
-        return None
-    xs = [p[0] for m in moves for p in m]
-    ys = [p[1] for m in moves for p in m]
-    c = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
-    first = math.hypot(moves[0][0][0] - c[0], moves[0][0][1] - c[1])
-    last = math.hypot(moves[-1][1][0] - c[0], moves[-1][1][1] - c[1])
-    if first > last + 0.2:
-        return "in"
-    if first < last - 0.2:
-        return "out"
-    return None
-
-
-def top_surfaces_outside_in(gcode):
-    """Make every top surface print from the outside in, reversing the ones that don't.
-
-    Returns (new_gcode, number reversed, number already outside-in)."""
     lines = gcode.split("\n")
-    out = []
-    state = _State()
-    state.end = (0.0, 0.0)
-    count = kept = 0
-    in_body = False
-    pending_wipe = None
+    out, count, in_body = [], 0, False
+    state = {"pos": (None, None), "f": None, "accel": None, "z": 0.0}
+    pending = None             # (trail, where the block used to end) for the wipe that follows
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -333,97 +374,103 @@ def top_surfaces_outside_in(gcode):
             in_body = True
         elif line.startswith(END_MARK):
             in_body = False
-        if in_body and line.startswith(TOP_MARK):
+        elif line.startswith("; Z_HEIGHT:"):
+            state["z"] = float(line.split(":", 1)[1])
+        if in_body and line.startswith(TOP_MARK) and state["pos"][0] is not None:
             j = i + 1
             while j < len(lines) and not _ends_block(lines[j]):
                 j += 1
-            way = direction(lines[i + 1:j], (state.x, state.y))
-            if way == "out":
+            segs, f_end, accel_end = _parse_block(lines[i + 1:j], state["pos"], state["f"], state["accel"])
+            plan = _spiral_plan(segs, min_size)
+            if plan:
+                outer, inner, _ = plan
                 out.append(line)
-                result = _reverse_block(lines[i + 1:j], state, out)
-                if result:
-                    pending_wipe, state.end = result
-                    count += 1
+                _redirect_travel_in(out, outer[0].a)
+                cur = {"f": state["f"], "accel": state["accel"]}
+                _emit(outer, out, cur)
+                # Jump to the middle like a normal travel: retract, hop, move, lower, un-retract.
+                z = state["z"]
+                out += ["G1 E-%s F%s" % (num(retract), num(retract_f)),
+                        "G1 Z%s F%s" % (num(z + hop), num(travel_f)),
+                        "G1 X%s Y%s F%s" % (_fmt_xy(inner[0].a[0]), _fmt_xy(inner[0].a[1]), num(travel_f)),
+                        "G1 Z%s" % num(z),
+                        "G1 E%s F%s" % (num(retract), num(deretract_f)),
+                        line]
+                cur = {}
+                _emit(inner, out, cur)
+                # Leave the modal state as the original block did.
+                if f_end:
+                    out.append("G1 F" + f_end)
+                if accel_end:
+                    out.append(accel_end)
+                state.update(f=f_end, accel=accel_end, pos=inner[-1].b)
+                pending = (inner, segs[-1].b)
+                count += 1
                 i = j
                 continue
-            if way == "in":
-                kept += 1
-            # Already outside-in (or not a ring pattern): leave the block as it is.
-        if in_body and pending_wipe and line.startswith("; WIPE_START"):
+        if in_body and pending and line.startswith("; WIPE_START"):
             out.append(line)
-            i = _rewrite_wipe(lines, i + 1, pending_wipe, out, state)
-            pending_wipe = None
+            i = _rewrite_wipe(lines, i + 1, pending[0], pending[1], out, state)
+            pending = None
             continue
-        if pending_wipe and (line.startswith(("; FEATURE:", "; CHANGE_LAYER")) or
-                             (_MOVE.match(line) and float(_words(line).get("E", 0) or 0) > 0)):
-            pending_wipe = None
-        # track position and modal state
+        if pending and (line.startswith(("; FEATURE:", "; CHANGE_LAYER")) or
+                        (_MOVE.match(line) and float(_words(line).get("E", 0) or 0) > 0)):
+            pending = None
         if _MOVE.match(line):
             w = _words(line)
-            if "X" in w:
-                state.x = float(w["X"])
-            if "Y" in w:
-                state.y = float(w["Y"])
+            x = float(w["X"]) if "X" in w else state["pos"][0]
+            y = float(w["Y"]) if "Y" in w else state["pos"][1]
+            state["pos"] = (x, y)
             if "F" in w:
-                state.f = w["F"]
+                state["f"] = w["F"]
         elif line.startswith("M204 "):
-            state.accel = line
+            state["accel"] = line
         out.append(line)
         i += 1
-    return "\n".join(out), count, kept
+    return "\n".join(out), count
 
 
-def top_surface_directions(gcode, min_size=0.0):
-    """For checking: the direction() of every top-surface block at least `min_size` mm across."""
+def top_surface_paths(gcode, min_size=PAD * 0.9):
+    """For checking: for every pad-sized top-surface block, the (start, end) distance from its
+    pad's centre. A reordered pad gives two blocks: (edge, ring) then (centre, ring)."""
     lines = gcode.split("\n")
-    found, body, x, y = [], False, None, None
+    found, body, pos = [], False, (None, None)
+    blocks = []
     i = 0
     while i < len(lines):
         line = lines[i]
         if line.startswith(START_MARK):
             body = True
-        if body and line.startswith(TOP_MARK):
+        if body and line.startswith(TOP_MARK) and pos[0] is not None:
             j = i + 1
             while j < len(lines) and not _ends_block(lines[j]):
                 j += 1
-            moves = _extrusions(lines[i + 1:j], (x, y))
-            xs = [p[0] for m in moves for p in m]
-            if moves and max(xs) - min(xs) >= min_size:
-                found.append(direction(lines[i + 1:j], (x, y)))
+            segs, _, _ = _parse_block(lines[i + 1:j], pos, None, None)
+            ext = [s for s in segs if s.e > 0]
+            if ext:
+                blocks.append(ext)
         if _MOVE.match(line):
             w = _words(line)
-            x = float(w["X"]) if "X" in w else x
-            y = float(w["Y"]) if "Y" in w else y
+            pos = (float(w["X"]) if "X" in w else pos[0], float(w["Y"]) if "Y" in w else pos[1])
         i += 1
+    # pads: group blocks by the centre of the larger of each consecutive pair
+    k = 0
+    while k < len(blocks):
+        b = blocks[k]
+        xs = [p[0] for s in b for p in (s.a, s.b)]
+        ys = [p[1] for s in b for p in (s.a, s.b)]
+        if max(xs) - min(xs) >= min_size:
+            c = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+            r = lambda p: math.hypot(p[0] - c[0], p[1] - c[1])  # noqa: E731
+            entry = [(r(b[0].a), r(b[-1].b))]
+            if k + 1 < len(blocks):
+                n = blocks[k + 1]
+                if all(r(p) <= max(r(b[0].a), 0) for s in n for p in (s.a, s.b)) and r(n[0].a) < 1.0:
+                    entry.append((r(n[0].a), r(n[-1].b)))
+                    k += 1
+            found.append(entry)
+        k += 1
     return found
-
-
-def ring_order(gcode, center):
-    """For checking: the distance from `center` of each top-surface extrusion run, in print order."""
-    runs, cur, body, in_top = [], [], False, False
-    x = y = 0.0
-    for line in gcode.split("\n"):
-        if line.startswith(START_MARK):
-            body = True
-        if not body:
-            continue
-        if line.startswith(TOP_MARK):
-            in_top = True
-            continue
-        if in_top and _ends_block(line):
-            in_top = False
-        if _MOVE.match(line):
-            w = _words(line)
-            nx, ny = float(w.get("X", x)), float(w.get("Y", y))
-            if in_top and float(w.get("E", 0) or 0) > 0:
-                cur.append(max(abs(nx - center[0]), abs(ny - center[1])))
-            elif cur:
-                runs.append(max(cur))
-                cur = []
-            x, y = nx, ny
-    if cur:
-        runs.append(max(cur))
-    return runs
 
 
 # ------------------------------------------------------------------ generate
@@ -446,19 +493,19 @@ def generate(path, offs, *, store, machine, process, filament, base_flow=None, n
         objects=build_objects(base, offs), center=printer.center, store=store, machine=machine,
         process=process, filament=filament, config_overrides=overrides,
         description="Flow rate test %+g%% to %+g%%" % (offs[0], offs[-1])), progress)
-    say("Making the top surfaces print from the outside in…")
-    new_gcode, count, kept = top_surfaces_outside_in(gcode)
+    say("Splitting the top spirals: outer half in, then centre out…")
+    new_gcode, count = split_spirals(gcode)
     drift = abs(body_extrusion(new_gcode) - body_extrusion(gcode))
     if drift > 0.01:
         raise RuntimeError("Reordering the top surfaces changed the total extrusion by %.3f mm" % drift)
-    # Every pad's top (the only top surfaces nearly a pad wide) must now run outside-in.
-    pads = top_surface_directions(new_gcode, min_size=PAD * 0.9)
-    if len(pads) < len(offs) or any(d != "in" for d in pads):
-        raise RuntimeError("Couldn't make every patch's top surface print from the outside in (%d of %d)"
-                           % (pads.count("in"), len(offs)))
+    # Every pad's top must now be two passes that meet at the ring: edge -> ring, then centre -> ring.
+    pads = top_surface_paths(new_gcode)
+    good = [p for p in pads if len(p) == 2 and p[0][0] > p[0][1] and p[1][0] < 1.0 and p[1][1] > p[1][0]]
+    if len(good) < len(offs):
+        raise RuntimeError("Couldn't split every patch's top surface (%d of %d)" % (len(good), len(offs)))
     labels = [flow_label(r) for r in ratios(base, offs)]
     header = "; FLOW_TEST: base flow ratio %s, patches (from the back left): %s\n" % (
         num(base), ", ".join("%s (%+g%%)" % (lab, o) for lab, o in zip(labels, offs)))
     save_gcode(path, new_gcode, png, header)
-    return {"path": path, "patches": len(offs), "labels": labels, "base": base, "reversed": count, "kept": kept,
+    return {"path": path, "patches": len(offs), "labels": labels, "base": base, "reordered": count,
             "temperature": nozzle_temp or qp.first(store.resolve("filament", filament).get("nozzle_temperature"))}

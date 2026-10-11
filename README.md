@@ -5,10 +5,10 @@ The calibration prints QIDI Studio is missing, or still does the old way, built 
 | Test | What it finds | What you get |
 |---|---|---|
 | **Temperature tower** | The best nozzle temperature | A ready-to-slice `.3mf`. Each floor prints at a different temperature, engraved on the front. |
-| **Flow rate** | The right flow ratio | Round patches whose tops are concentric circles printed from the **outside in**, each labelled with its flow ratio. Includes a calculator for the next pass. |
+| **Flow rate** | The right flow ratio | Round patches with a spiral top printed in two passes, like OrcaSlicer's: the outer half from the edge in, then the inner half from the centre out. Each is labelled with its flow ratio, and there's a calculator for the next pass. |
 | **Retraction** | The shortest retraction that stops stringing | Two towers whose bands use different retraction lengths, each labelled. |
 
-QIDI Studio can't do what the flow and retraction tests need: it picks the order of concentric rings itself (and sometimes prints them inside out), and it can't change retraction by height. So the app slices those two tests for you with QIDI Studio, adjusts the G-code, and saves it ready to print. It can also upload the file to the network printer you set up in QIDI Studio.
+QIDI Studio can't do what the flow and retraction tests need: it prints a spiral top in one go, and it can't change retraction by height. So the app slices those two tests for you with QIDI Studio, adjusts the G-code, and saves it ready to print. It can also upload the file to the network printer you set up in QIDI Studio.
 
 ![The app's flow rate tab](docs/generator.png)
 
@@ -40,7 +40,7 @@ A good order is temperature, then flow, then retraction, each at the settings yo
 
 **Retraction test:** print it at the temperature you picked from the tower. Look at the strings between the two towers and find the lowest band without strings or blobs. Use that band's length (engraved on the left tower) as your retraction length. Going much higher than needed can cause under-extrusion and wear on the filament.
 
-**Flow rate test:** the patches are round so the rings have no corners, which keeps the result from depending on pressure advance, since you'd usually tune that afterwards. Look at the centre of each patch. Too much flow leaves a raised ridge or blob in the middle; too little leaves gaps between the rings. Pick the patch with the flattest, most even centre and enter the number on its tab as the filament's flow ratio. Use **Coarse** (±20 %) first. Then enter the best patch's change in the **Calculator** and click **Use it for a fine pass** to print a ±5 % test around your new value.
+**Flow rate test:** the two passes of each patch's spiral meet at a ring about 70 % of the way out, and any extra plastic collects there. Too much flow leaves a raised ring; too little leaves a groove or gaps along it. Pick the patch with the flattest, smoothest ring and enter the number on its tab as the filament's flow ratio. The patches are round, so the spiral has no corners, which keeps the result from depending on pressure advance (usually tuned after flow). Use **Coarse** (±20 %) first. Then enter the best patch's change in the **Calculator** and click **Use it for a fine pass** to print a ±5 % test around your new value.
 
 ## Running from source
 

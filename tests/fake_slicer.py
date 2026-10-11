@@ -6,6 +6,7 @@ style (relative extrusion, a wipe and a retraction before every travel, and
 an un-retraction afterwards), using the project's retraction length.
 """
 import hashlib
+import math
 import json
 import os
 import sys
@@ -27,30 +28,47 @@ def gcode(retraction, height, layer=0.2, extra=0.0, nozzle="210", top=False):
                   "G1 X70 Y10 E1.2"]
         z += layer
     if top:
-        lines += top_surface(rings=tuple(round(0.4 * k, 1) for k in range(1, 37)))  # pad-sized
+        lines += spiral_top()
     lines += ["; MACHINE_END_GCODE_START", "G1 E-3 F1800 ; end G-code retraction, must stay untouched",
               "; CONFIG_BLOCK_START", "; nozzle_temperature = %s" % nozzle,
               "; retraction_length = %s" % retraction, "; CONFIG_BLOCK_END", ""]
     return "\n".join(lines)
 
 
-def top_surface(cx=100.0, cy=100.0, z=1.6, rings=(0.4, 0.8, 1.2, 1.6)):
-    """A concentric top surface the way QIDI Studio prints it: inside out, a hop between
-    rings, then a wipe along the outermost ring."""
-    r0 = rings[0]
-    lines = ["G1 X%g Y%g Z%g F30000" % (cx + r0, cy, z + 0.4), "G1 Z%g" % z, "G1 E.8 F1800",
-             "; FEATURE: Top surface", "; LINE_WIDTH: 0.42", "G1 F9000", "M204 S2000"]
-    for k, r in enumerate(rings):
-        if k:
-            lines += ["M204 S10000", "G1 X%g Y%g F30000" % (cx + r, cy), "; LINE_WIDTH: 0.4%d" % k,
-                      "G1 F9000", "M204 S2000"]
-        e = round(2 * r * 0.05, 5)
-        lines += ["G1 X%g Y%g E%s" % (cx + r, cy - r, e / 2), "G1 X%g Y%g E%s" % (cx - r, cy - r, e),
-                  "G1 X%g Y%g E%s" % (cx - r, cy + r, e), "G1 X%g Y%g E%s" % (cx + r, cy + r, e),
-                  "G1 X%g Y%g E%s" % (cx + r, cy, e / 2)]
-    rl = rings[-1]
-    lines += ["M204 S10000", "; WIPE_START", "G1 F9000", "G1 X%g Y%g E-.38" % (cx + rl, cy - 1),
-              "G1 X%g Y%g E-.38" % (cx + rl, cy - 1.6), "; WIPE_END", "G1 E-.04 F1800",
+def spiral_points(cx, cy, r_max, pitch=0.42, step_deg=10.0):
+    """Points of an Archimedean spiral from r_max in to the centre."""
+    pts, theta = [], 0.0
+    turns = r_max / pitch
+    total = turns * 360.0
+    while theta <= total + 1e-9:
+        r = r_max * (1 - theta / total)
+        pts.append((round(cx + r * math.cos(math.radians(theta)), 4), round(cy + r * math.sin(math.radians(theta)), 4)))
+        theta += step_deg
+    return pts
+
+
+def spiral_top(cx=100.0, cy=100.0, z=1.6, r_max=14.4, outward=False, stubs=False):
+    """An Archimedean top surface the way QIDI Studio prints it: one unbroken spiral (edge to
+    centre, or centre to edge), optionally after a few tiny clipped stubs at the edge, then a
+    wipe back along the last line."""
+    pts = spiral_points(cx, cy, r_max)
+    if outward:
+        pts.reverse()
+    lines = []
+    start = pts[0]
+    if stubs:
+        sx, sy = cx - r_max - 0.05, cy
+        start = (sx, sy + 0.5)
+    lines += ["G1 X%g Y%g Z%g F30000" % (start[0], start[1], z + 0.4), "G1 Z%g" % z, "G1 E.8 F1800",
+              "; FEATURE: Top surface", "; LINE_WIDTH: 0.42", "G1 F9000", "M204 S2000"]
+    if stubs:
+        lines += ["G1 X%g Y%g E.01" % (sx, sy + 0.9), "G1 X%g Y%g F30000" % (sx, sy - 0.5), "G1 F9000",
+                  "G1 X%g Y%g E.01" % (sx, sy - 0.9), "G1 X%g Y%g F30000" % pts[0], "G1 F9000"]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        lines.append("G1 X%g Y%g E%s" % (x1, y1, round(math.hypot(x1 - x0, y1 - y0) * 0.033, 5)))
+    (xa, ya), (xb, yb) = pts[-1], pts[-2]
+    lines += ["M204 S10000", "; WIPE_START", "G1 F9000",
+              "G1 X%g Y%g E-.76" % (xb, yb), "; WIPE_END", "G1 E-.04 F1800",
               "G1 X%g Y%g Z%g F30000" % (cx + 20, cy, z + 0.4)]
     return lines
 

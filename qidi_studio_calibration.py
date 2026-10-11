@@ -14,7 +14,7 @@ import temp_tower as tt  # noqa: E402
 from studio import cli_command, open_in_studio, studio_command  # noqa: E402
 from tower_geometry import HERE as DATA_DIR  # noqa: E402
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 APP_NAME = "QIDI Studio Calibration"
 NO_PRINTER = "(no network printer set up in QIDI Studio)"
 
@@ -350,7 +350,7 @@ def run_gui():
     spin_row(f_tab, 3, "Nozzle", [("f_temp", "", 100, 500, 5)], "°C")
     send_row(f_tab, 4)
     save_row(f_tab, 5, "f_output", "gcode")
-    sliced_note(f_tab, 6, "QIDI Studio can't be told to print concentric rings from the outside in,")
+    sliced_note(f_tab, 6, "QIDI Studio prints a spiral top in one go,")
 
     # Flow calculator: current flow × (1 + best patch's change).
     ttk.Separator(f_tab).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(10, 6))
@@ -360,9 +360,6 @@ def run_gui():
     ttk.Label(calc, text="Best patch").grid(row=0, column=0, padx=(0, 4))
     calc_spin = ttk.Spinbox(calc, textvariable=v["c_offset"], from_=-50, to=50, increment=1, width=6)
     calc_spin.grid(row=0, column=1)
-    # Recalculate whenever either number changes, however it was changed.
-    for key in ("c_offset", "f_base"):
-        v[key].trace_add("write", lambda *_: update_calculator())
     ttk.Label(calc, text="%  →  new flow ratio").grid(row=0, column=2, padx=(4, 4))
     ttk.Label(calc, textvariable=v["c_result"], font=("TkDefaultFont", 10, "bold")).grid(row=0, column=3)
     ttk.Button(calc, text="Use it for a fine pass", command=lambda: use_calculated_flow()).grid(
@@ -653,7 +650,7 @@ def run_gui():
                 def make(progress):
                     r = ft.generate(out, offs, base_flow=base, nozzle_temp=temp, progress=progress, **presets)
                     return ("Saved %s\n%d patches at %s °C, flow ratios from the back left: %s. Pick the patch with "
-                            "the smoothest centre and set the filament's flow ratio to its number." % (
+                            "the flattest ring where the two halves meet, and set the filament's flow ratio to its number." % (
                                 r["path"], r["patches"], r["temperature"], ", ".join(r["labels"])))
         except ValueError as e:
             return finish(None, None, str(e), False)
@@ -710,6 +707,10 @@ def run_gui():
     combos["filament"].bind("<<ComboboxSelected>>", on_filament)
     combos["process"].bind("<<ComboboxSelected>>", lambda e: update_summaries())
     tabs.bind("<<NotebookTabChanged>>", update_buttons)
+    # Recalculate whenever either number changes, however it was changed. (Hooked up
+    # here, once update_calculator exists.)
+    for key in ("c_offset", "f_base"):
+        v[key].trace_add("write", lambda *_: update_calculator())
     load_store()
     update_buttons()
     root.mainloop()
