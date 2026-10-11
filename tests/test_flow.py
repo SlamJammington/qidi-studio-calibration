@@ -51,7 +51,7 @@ class SettingsTests(unittest.TestCase):
 class ReverseTests(unittest.TestCase):
     def setUp(self):
         self.src = sample_gcode()
-        self.new, self.count = ft.reverse_top_surfaces(self.src)
+        self.new, self.count, self.kept = ft.top_surfaces_outside_in(self.src)
 
     def test_rings_now_run_outside_in(self):
         self.assertEqual(self.count, 1)
@@ -84,10 +84,18 @@ class ReverseTests(unittest.TestCase):
         length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
         self.assertAlmostEqual(length, 1.6, places=3)
 
+    def test_outside_in_surfaces_are_left_alone(self):
+        once = self.new
+        twice, count, kept = ft.top_surfaces_outside_in(once)
+        self.assertEqual((count, kept), (0, 1))
+        self.assertEqual(twice, once)
+        self.assertEqual(ft.top_surface_directions(once), ["in"])
+        self.assertEqual(ft.top_surface_directions(self.src), ["out"])
+
     def test_unexpected_lines_refuse(self):
         bad = self.src.replace("M204 S2000", "M106 S255", 1)
         with self.assertRaises(RuntimeError):
-            ft.reverse_top_surfaces(bad)
+            ft.top_surfaces_outside_in(bad)
 
 
 class ProjectTests(unittest.TestCase):
@@ -112,6 +120,15 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(len(xs), ft.layout(5)[0])
         self.assertEqual(len(ms.findall("./plate/model_instance")), 5)
 
+    def test_pads_are_round(self):
+        pad = ft.sample_parts("1.00")[0][2]
+        ys = [v[1] for v in pad.verts]
+        cy = (min(ys) + max(ys)) / 2
+        radii = [math.hypot(v[0], v[1] - cy) for v in pad.verts]
+        self.assertAlmostEqual(min(radii), ft.PAD / 2, places=6)
+        self.assertAlmostEqual(max(radii), ft.PAD / 2, places=6)
+        self.assertEqual(len(pad.verts), 2 * ft.PAD_SEGMENTS)
+
     def test_label_text_stands_on_the_tab(self):
         parts = ft.sample_parts("0.98")
         tab = parts[1][2]
@@ -131,7 +148,7 @@ class GenerateTests(unittest.TestCase):
             with open(out, encoding="utf-8") as f:
                 gcode = f.read()
         self.assertEqual(r["labels"], ["0.95"])
-        self.assertEqual(r["reversed"], 1)
+        self.assertEqual((r["reversed"], r["kept"]), (1, 0))
         self.assertIn("; FLOW_TEST: base flow ratio 0.95", gcode)
         self.assertIn("; nozzle_temperature = 205", gcode)
         runs = ft.ring_order(gcode, (100, 100))

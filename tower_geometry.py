@@ -130,8 +130,8 @@ def circle(cx, cy, r, z=0.0, n=SEGMENTS):
     return [(cx + r * math.cos(2 * math.pi * i / n), cy + r * math.sin(2 * math.pi * i / n), z) for i in range(n)]
 
 
-def cylinder_z(cx, cy, r, z0, z1):
-    return prism(circle(cx, cy, r, z0), (0, 0, z1 - z0))
+def cylinder_z(cx, cy, r, z0, z1, n=SEGMENTS):
+    return prism(circle(cx, cy, r, z0, n), (0, 0, z1 - z0))
 
 
 def cylinder_y(cx, cz, r, y0, y1, n=SEGMENTS):

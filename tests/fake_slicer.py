@@ -27,7 +27,7 @@ def gcode(retraction, height, layer=0.2, extra=0.0, nozzle="210", top=False):
                   "G1 X70 Y10 E1.2"]
         z += layer
     if top:
-        lines += top_surface()
+        lines += top_surface(rings=tuple(round(0.4 * k, 1) for k in range(1, 37)))  # pad-sized
     lines += ["; MACHINE_END_GCODE_START", "G1 E-3 F1800 ; end G-code retraction, must stay untouched",
               "; CONFIG_BLOCK_START", "; nozzle_temperature = %s" % nozzle,
               "; retraction_length = %s" % retraction, "; CONFIG_BLOCK_END", ""]

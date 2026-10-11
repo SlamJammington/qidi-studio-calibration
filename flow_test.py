@@ -1,23 +1,24 @@
 r"""Build a flow rate test with concentric top surfaces printed from the outside in.
 
-Each patch is a square pad with its own flow ratio and a label tab in front:
+Each patch is a round pad with its own flow ratio and a label tab in front:
 
-     _____________   _____________   _____________
-    |  _________  | |  _________  | |  _________  |
-    | |  _____  | | | |  _____  | | | |  _____  | |    concentric top surface,
-    | | |  _  | | | | | |  _  | | | | | |  _  | | |    printed outside -> in
-    | | |_|_| | | | | | |_|_| | | | | | |_|_| | | |
-    | |_______| | | | |_______| | | | |_______| | |
-    |_____________| |_____________| |_____________|
-    |__ 0.931 ____| |__ 0.980 ____| |__ 1.029 ____|    raised flow ratio
+        _____             _____             _____
+      /  ___  \         /  ___  \         /  ___  \       concentric circles,
+     |  ( o )  |       |  ( o )  |       |  ( o )  |      printed outside -> in
+      \_______/         \_______/         \_______/
+     |__0.931__|       |__0.980__|       |__1.029__|      raised flow ratio
+
+Round pads give round rings: with no corners for the nozzle to slow into and
+speed out of, the result doesn't depend on pressure advance being tuned yet.
 
 Printing the rings from the edge inwards pushes any extra plastic towards the
 middle, so over-extrusion shows up as a ridge or blob in the centre and
 under-extrusion as gaps there. The patch with the cleanest centre wins.
 
-QIDI Studio prints concentric top surfaces from the inside out and can't be
-told otherwise, so the test is sliced with QIDI Studio's command-line slicer
-and every top-surface path is reversed in the G-code.
+QIDI Studio picks the ring order itself (a square pad came out inside-out, a
+round one outside-in) and can't be told which, so the test is sliced with QIDI
+Studio's command-line slicer and any top surface that runs inside-out is
+reversed in the G-code.
 """
 import math
 import re
@@ -27,9 +28,11 @@ import qidi_profiles as qp
 import tower_geometry as geo
 from sliced_gcode import END_MARK, START_MARK, body_extrusion, num, save_gcode, slice_to_gcode
 
-PAD = 30.0          # pad size (x and y)
+PAD = 30.0          # pad diameter
+PAD_SEGMENTS = 96   # sides of the pad's circle (3.75 degrees each)
 PAD_H = 1.6         # pad thickness
 TAB_D = 9.0         # label tab depth, in front of the pad
+TAB_TUCK = 3.0      # how far the tab reaches under the pad
 TAB_H = 0.8         # label tab thickness
 TEXT_H = 5.0        # label text height
 TEXT_RAISE = 0.6    # label text height above the tab
@@ -81,8 +84,11 @@ def sample_parts(label):
     """[(name, subtype, Mesh)] for one sample, centred on x/y, base at z=0."""
     d = PAD + TAB_D
     y0 = -d / 2
-    pad = geo.box(-PAD / 2, y0 + TAB_D, 0, PAD / 2, y0 + d, PAD_H)
-    tab = geo.box(-PAD / 2, y0, 0, PAD / 2, y0 + TAB_D + 0.05, TAB_H)
+    # Round pads give round rings: no corners for the nozzle to slow into, so the
+    # result doesn't depend on pressure advance being tuned yet.
+    pad = geo.cylinder_z(0.0, y0 + TAB_D + PAD / 2, PAD / 2, 0, PAD_H, n=PAD_SEGMENTS)
+    # The tab tucks under the disc so the two print as one piece.
+    tab = geo.box(-PAD / 2, y0, 0, PAD / 2, y0 + TAB_D + TAB_TUCK, TAB_H)
     text = geo.raised_text_mesh(label, 0.0, y0 + TAB_D / 2, TAB_H, PAD - 4, TEXT_H, TEXT_RAISE)
     return [("Pad", "normal_part", pad), ("Label tab", "normal_part", tab.extend(text))]
 
@@ -274,13 +280,50 @@ def _rewrite_wipe(lines, i, path, out, state):
     return j
 
 
-def reverse_top_surfaces(gcode):
-    """Print every top surface in reverse. Returns (new_gcode, number of surfaces reversed)."""
+def _extrusions(block, start):
+    """[(from, to)] of the extruding moves in a top-surface block that starts at `start`."""
+    pos, found = start, []
+    for line in block:
+        if _MOVE.match(line):
+            w = _words(line)
+            if "X" not in w and "Y" not in w:
+                continue
+            to = (float(w.get("X", pos[0])), float(w.get("Y", pos[1])))
+            if float(w.get("E", 0) or 0) > 0:
+                found.append((pos, to))
+            pos = to
+    return found
+
+
+def direction(block, start):
+    """"in" if a concentric block runs from the outside in, "out" if inside out, None if unclear.
+
+    QIDI Studio chains the rings from wherever the nozzle is, so either can happen
+    (a square pad came out inside-out, a round one outside-in)."""
+    moves = _extrusions(block, start)
+    if not moves or start[0] is None:
+        return None
+    xs = [p[0] for m in moves for p in m]
+    ys = [p[1] for m in moves for p in m]
+    c = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+    first = math.hypot(moves[0][0][0] - c[0], moves[0][0][1] - c[1])
+    last = math.hypot(moves[-1][1][0] - c[0], moves[-1][1][1] - c[1])
+    if first > last + 0.2:
+        return "in"
+    if first < last - 0.2:
+        return "out"
+    return None
+
+
+def top_surfaces_outside_in(gcode):
+    """Make every top surface print from the outside in, reversing the ones that don't.
+
+    Returns (new_gcode, number reversed, number already outside-in)."""
     lines = gcode.split("\n")
     out = []
     state = _State()
     state.end = (0.0, 0.0)
-    count = 0
+    count = kept = 0
     in_body = False
     pending_wipe = None
     i = 0
@@ -291,16 +334,21 @@ def reverse_top_surfaces(gcode):
         elif line.startswith(END_MARK):
             in_body = False
         if in_body and line.startswith(TOP_MARK):
-            out.append(line)
             j = i + 1
             while j < len(lines) and not _ends_block(lines[j]):
                 j += 1
-            result = _reverse_block(lines[i + 1:j], state, out)
-            if result:
-                pending_wipe, state.end = result
-                count += 1
-            i = j
-            continue
+            way = direction(lines[i + 1:j], (state.x, state.y))
+            if way == "out":
+                out.append(line)
+                result = _reverse_block(lines[i + 1:j], state, out)
+                if result:
+                    pending_wipe, state.end = result
+                    count += 1
+                i = j
+                continue
+            if way == "in":
+                kept += 1
+            # Already outside-in (or not a ring pattern): leave the block as it is.
         if in_body and pending_wipe and line.startswith("; WIPE_START"):
             out.append(line)
             i = _rewrite_wipe(lines, i + 1, pending_wipe, out, state)
@@ -322,7 +370,32 @@ def reverse_top_surfaces(gcode):
             state.accel = line
         out.append(line)
         i += 1
-    return "\n".join(out), count
+    return "\n".join(out), count, kept
+
+
+def top_surface_directions(gcode, min_size=0.0):
+    """For checking: the direction() of every top-surface block at least `min_size` mm across."""
+    lines = gcode.split("\n")
+    found, body, x, y = [], False, None, None
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith(START_MARK):
+            body = True
+        if body and line.startswith(TOP_MARK):
+            j = i + 1
+            while j < len(lines) and not _ends_block(lines[j]):
+                j += 1
+            moves = _extrusions(lines[i + 1:j], (x, y))
+            xs = [p[0] for m in moves for p in m]
+            if moves and max(xs) - min(xs) >= min_size:
+                found.append(direction(lines[i + 1:j], (x, y)))
+        if _MOVE.match(line):
+            w = _words(line)
+            x = float(w["X"]) if "X" in w else x
+            y = float(w["Y"]) if "Y" in w else y
+        i += 1
+    return found
 
 
 def ring_order(gcode, center):
@@ -373,16 +446,19 @@ def generate(path, offs, *, store, machine, process, filament, base_flow=None, n
         objects=build_objects(base, offs), center=printer.center, store=store, machine=machine,
         process=process, filament=filament, config_overrides=overrides,
         description="Flow rate test %+g%% to %+g%%" % (offs[0], offs[-1])), progress)
-    say("Reversing the top surfaces…")
-    new_gcode, count = reverse_top_surfaces(gcode)
-    if count < len(offs):
-        raise RuntimeError("Only %d of %d top surfaces could be reversed" % (count, len(offs)))
+    say("Making the top surfaces print from the outside in…")
+    new_gcode, count, kept = top_surfaces_outside_in(gcode)
     drift = abs(body_extrusion(new_gcode) - body_extrusion(gcode))
     if drift > 0.01:
-        raise RuntimeError("Reversing the top surfaces changed the total extrusion by %.3f mm" % drift)
+        raise RuntimeError("Reordering the top surfaces changed the total extrusion by %.3f mm" % drift)
+    # Every pad's top (the only top surfaces nearly a pad wide) must now run outside-in.
+    pads = top_surface_directions(new_gcode, min_size=PAD * 0.9)
+    if len(pads) < len(offs) or any(d != "in" for d in pads):
+        raise RuntimeError("Couldn't make every patch's top surface print from the outside in (%d of %d)"
+                           % (pads.count("in"), len(offs)))
     labels = [flow_label(r) for r in ratios(base, offs)]
     header = "; FLOW_TEST: base flow ratio %s, patches (from the back left): %s\n" % (
         num(base), ", ".join("%s (%+g%%)" % (lab, o) for lab, o in zip(labels, offs)))
     save_gcode(path, new_gcode, png, header)
-    return {"path": path, "patches": len(offs), "labels": labels, "base": base, "reversed": count,
+    return {"path": path, "patches": len(offs), "labels": labels, "base": base, "reversed": count, "kept": kept,
             "temperature": nozzle_temp or qp.first(store.resolve("filament", filament).get("nozzle_temperature"))}

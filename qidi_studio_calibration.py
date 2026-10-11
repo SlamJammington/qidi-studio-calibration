@@ -14,7 +14,7 @@ import temp_tower as tt  # noqa: E402
 from studio import cli_command, open_in_studio, studio_command  # noqa: E402
 from tower_geometry import HERE as DATA_DIR  # noqa: E402
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 APP_NAME = "QIDI Studio Calibration"
 NO_PRINTER = "(no network printer set up in QIDI Studio)"
 
@@ -350,7 +350,7 @@ def run_gui():
     spin_row(f_tab, 3, "Nozzle", [("f_temp", "", 100, 500, 5)], "°C")
     send_row(f_tab, 4)
     save_row(f_tab, 5, "f_output", "gcode")
-    sliced_note(f_tab, 6, "QIDI Studio prints concentric top surfaces from the inside out,")
+    sliced_note(f_tab, 6, "QIDI Studio can't be told to print concentric rings from the outside in,")
 
     # Flow calculator: current flow × (1 + best patch's change).
     ttk.Separator(f_tab).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(10, 6))
