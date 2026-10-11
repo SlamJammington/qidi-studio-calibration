@@ -12,7 +12,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import printer_upload as pu  # noqa: E402
 import qidi_profiles as qp  # noqa: E402
-import qidi_temp_tower as app  # noqa: E402
+import qidi_studio_calibration as app  # noqa: E402
 
 FIXTURE = os.path.join(ROOT, "tests", "fixtures", "QIDIStudio")
 
@@ -101,7 +101,7 @@ class UploadTests(unittest.TestCase):
 class CliErrorTests(unittest.TestCase):
     def test_unknown_printer_is_a_plain_error(self):
         import subprocess
-        r = subprocess.run([sys.executable, os.path.join(ROOT, "qidi_temp_tower.py"), "--qidi-dir", FIXTURE,
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "qidi_studio_calibration.py"), "--qidi-dir", FIXTURE,
                             "--test", "retraction", "--send", "Nope"], capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 1)
         self.assertIn("Error: No network printer called 'Nope'", r.stderr)

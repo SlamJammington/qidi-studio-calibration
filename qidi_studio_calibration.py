@@ -1,4 +1,4 @@
-"""QIDI Studio temperature tower and retraction test generator (GUI, or command line with --help)."""
+"""QIDI Studio temperature tower, retraction test and flow rate test generator (GUI, or command line with --help)."""
 import argparse
 import os
 import re
@@ -8,13 +8,15 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import qidi_profiles as qp  # noqa: E402
 import printer_upload as pu  # noqa: E402
+import flow_test as ft  # noqa: E402
 import retraction_test as rt  # noqa: E402
 import temp_tower as tt  # noqa: E402
 from studio import cli_command, open_in_studio, studio_command  # noqa: E402
 from tower_geometry import HERE as DATA_DIR  # noqa: E402
 
-__version__ = "1.1.0"
-APP_NAME = "QIDI Studio Calibration Towers"
+__version__ = "1.2.0"
+APP_NAME = "QIDI Studio Calibration"
+NO_PRINTER = "(no network printer set up in QIDI Studio)"
 
 def filament_defaults(store, filament):
     """(start, end, step) suggested from the filament's recommended range, hottest at the bottom."""
@@ -55,6 +57,16 @@ def default_retraction_output(store, filament, values):
         "Retraction Test %s %s-%smm" % (short, rt.fmt(values[0]), rt.fmt(values[-1]))) + ".gcode")
 
 
+def default_flow_output(store, filament, offs):
+    short = filament.split("@")[0].strip()
+    return os.path.join(default_output_dir(store), safe_filename(
+        "Flow Test %s %+g to %+g%%" % (short, offs[0], offs[-1])) + ".gcode")
+
+
+def fmt_flow(v):
+    return ("%.3f" % v).rstrip("0").rstrip(".")
+
+
 def pick_network_printer(store, name=None):
     """A network printer saved in QIDI Studio, by name (default: the first one)."""
     printers = store.network_printers()
@@ -77,25 +89,29 @@ def run_cli(argv):
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError):
             pass
-    ap = argparse.ArgumentParser(prog="qidi_temp_tower", description=__doc__)
+    ap = argparse.ArgumentParser(prog="qidi_studio_calibration", description=__doc__)
     ap.add_argument("--version", action="version", version="%(prog)s " + __version__)
-    ap.add_argument("--test", choices=["temperature", "retraction"], default="temperature",
+    ap.add_argument("--test", choices=["temperature", "retraction", "flow"], default="temperature",
                     help="which test to make (default: temperature)")
     ap.add_argument("--qidi-dir", help="QIDI Studio data folder (default: %s)" % qp.default_root().replace("%", "%%"))
     ap.add_argument("--printer", help="printer preset (default: the one selected in QIDI Studio)")
     ap.add_argument("--process", help="process preset (default: the one selected in QIDI Studio)")
     ap.add_argument("--filament", help="filament preset (default: the one selected in QIDI Studio)")
-    ap.add_argument("--start", type=float, help="bottom value: °C, or mm of retraction (default: from the presets)")
-    ap.add_argument("--end", type=float, help="top value (default: from the presets)")
-    ap.add_argument("--step", type=float, help="step between floors/bands (default: 5 °C, or 0.2/0.5 mm)")
+    ap.add_argument("--start", type=float,
+                    help="first value: °C, mm of retraction, or %% flow change (default: from the presets / -20)")
+    ap.add_argument("--end", type=float, help="last value (default: from the presets / 20)")
+    ap.add_argument("--step", type=float, help="step between values (default: 5 °C, 0.2/0.5 mm, or 5 %%)")
     ap.add_argument("--wait", action="store_true", help="temperature: use M109 (wait) instead of M104")
     ap.add_argument("--no-settings", action="store_true",
                     help="temperature: don't embed presets; QIDI Studio keeps whatever is selected")
     ap.add_argument("--band-height", type=float, default=5.0, help="retraction: height of each band in mm")
-    ap.add_argument("--temp", type=int, help="retraction: nozzle temperature (default: the filament preset's)")
+    ap.add_argument("--flow", type=float, help="flow: the current flow ratio (default: the filament preset's)")
+    ap.add_argument("--temp", type=int, help="retraction/flow: nozzle temperature (default: the filament preset's)")
     ap.add_argument("--send", nargs="?", const="", metavar="PRINTER",
-                    help="retraction: upload the G-code to a network printer saved in QIDI Studio (default: the first)")
-    ap.add_argument("--print-now", action="store_true", help="retraction: with --send, start printing once uploaded")
+                    help="retraction/flow: upload the G-code to a network printer saved in QIDI Studio "
+                         "(default: the first)")
+    ap.add_argument("--print-now", action="store_true",
+                    help="retraction/flow: with --send, start printing once uploaded")
     ap.add_argument("--list", choices=["printer", "process", "filament"], help="list presets and exit")
     ap.add_argument("--open", action="store_true", help="open the result in QIDI Studio")
     ap.add_argument("-o", "--output", help="output file")
@@ -117,16 +133,26 @@ def run_cli(argv):
         if not name or not store.get(kind, name):
             sys.exit(f"{kind} preset not found: {name!r} (use --list)")
 
-    if a.test == "retraction":
-        d_start, d_end, d_step = rt.defaults(store, machine)
-        values = rt.lengths(d_start if a.start is None else a.start, d_end if a.end is None else a.end,
-                            d_step if a.step is None else a.step)
-        out = a.output or default_retraction_output(store, filament, values)
+    def pick(value, default):
+        return default if value is None else value
+
+    if a.test in ("retraction", "flow"):
         target = pick_network_printer(store, a.send) if a.send is not None else None
-        r = rt.generate(out, values, store=store, machine=machine, process=process, filament=filament,
-                        band_h=a.band_height, nozzle_temp=a.temp, progress=print)
-        print("Wrote %s\n  %d bands of %g mm (%g mm tall), retraction from the bottom: %s mm" % (
-            r["path"], r["bands"], a.band_height, r["height"], ", ".join(rt.fmt(x) for x in values)))
+        if a.test == "retraction":
+            d_start, d_end, d_step = rt.defaults(store, machine)
+            values = rt.lengths(pick(a.start, d_start), pick(a.end, d_end), pick(a.step, d_step))
+            out = a.output or default_retraction_output(store, filament, values)
+            r = rt.generate(out, values, store=store, machine=machine, process=process, filament=filament,
+                            band_h=a.band_height, nozzle_temp=a.temp, progress=print)
+            print("Wrote %s\n  %d bands of %g mm (%g mm tall), retraction from the bottom: %s mm" % (
+                r["path"], r["bands"], a.band_height, r["height"], ", ".join(rt.fmt(x) for x in values)))
+        else:
+            offs = ft.offsets(pick(a.start, -20), pick(a.end, 20), pick(a.step, 5))
+            out = a.output or default_flow_output(store, filament, offs)
+            r = ft.generate(out, offs, store=store, machine=machine, process=process, filament=filament,
+                            base_flow=a.flow, nozzle_temp=a.temp, progress=print)
+            print("Wrote %s\n  %d patches, flow ratios from the back left: %s" % (
+                r["path"], r["patches"], ", ".join(r["labels"])))
         if target:
             print("Sending to %s…" % pu.describe(target))
             pu.upload(target, out, start=a.print_now)
@@ -170,7 +196,8 @@ def run_gui():
     v = {k: tk.StringVar() for k in ("dir", "printer", "process", "filament", "info",
                                      "start", "end", "step", "summary", "output",
                                      "r_start", "r_end", "r_step", "r_band", "r_temp", "r_summary", "r_output",
-                                     "r_send")}
+                                     "r_send", "f_start", "f_end", "f_step", "f_base", "f_temp", "f_summary",
+                                     "f_output", "c_offset", "c_result")}
     v_wait = tk.BooleanVar(value=False)
     v_embed = tk.BooleanVar(value=True)
     v_all = tk.BooleanVar(value=False)
@@ -178,6 +205,24 @@ def run_gui():
     v["dir"].set(qp.default_root())
     v["step"].set("5")
     v["r_band"].set("5")
+    v["f_start"].set("-20")
+    v["f_end"].set("20")
+    v["f_step"].set("5")
+    field_names = {"start": "the bottom temperature", "end": "the top temperature", "step": "the temperature step",
+                   "r_start": "the bottom retraction", "r_end": "the top retraction", "r_step": "the retraction step",
+                   "r_band": "the band height", "r_temp": "the nozzle temperature",
+                   "f_start": "the first flow change", "f_end": "the last flow change", "f_step": "the flow step",
+                   "f_base": "the current flow ratio", "f_temp": "the nozzle temperature"}
+
+    def number(key, optional=False):
+        """The number typed in a field, or a plain error naming the field."""
+        text = v[key].get().strip()
+        if not text and optional:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            raise ValueError("Enter a number for %s." % field_names[key]) from None
     status = tk.StringVar()
     can_slice = cli_command() is not None
 
@@ -227,8 +272,10 @@ def run_gui():
             sp.bind("<KeyRelease>", lambda e: update_summaries())
             col += 2
         ttk.Label(box, text=unit).grid(row=0, column=col, padx=(4, 0))
-        if extra:
-            ttk.Button(box, text=extra[0], command=extra[1]).grid(row=0, column=col + 1, padx=(12, 0))
+        if extra and isinstance(extra[0], str):
+            extra = [extra]
+        for i, (text, command) in enumerate(extra or []):
+            ttk.Button(box, text=text, command=command).grid(row=0, column=col + 1 + i, padx=(12 if i == 0 else 4, 0))
 
     def save_row(parent, r, key, kind):
         label(parent, "Save as", r)
@@ -264,20 +311,66 @@ def run_gui():
     spin_row(r_tab, 2, "Band height", [("r_band", "", 2, 20, 1)], "mm")
     spin_row(r_tab, 3, "Nozzle", [("r_temp", "", 100, 500, 5)],
              "°C   (use the best floor from your temperature tower)")
-    label(r_tab, "Send to", 4)
-    send_box = ttk.Frame(r_tab)
-    send_box.grid(row=4, column=1, columnspan=2, sticky="w")
-    send_combo = ttk.Combobox(send_box, textvariable=v["r_send"], state="readonly", width=30)
-    send_combo.grid(row=0, column=0)
-    ttk.Checkbutton(send_box, text="Start printing right away", variable=v_print_now).grid(
-        row=0, column=1, padx=(12, 0))
+    send_combos = []
+
+    def send_row(parent, r):
+        # Both sliced tests share the chosen network printer and the "start printing" choice.
+        label(parent, "Send to", r)
+        box = ttk.Frame(parent)
+        box.grid(row=r, column=1, columnspan=2, sticky="w")
+        combo = ttk.Combobox(box, textvariable=v["r_send"], state="readonly", width=30)
+        combo.grid(row=0, column=0)
+        send_combos.append(combo)
+        ttk.Checkbutton(box, text="Start printing right away", variable=v_print_now).grid(
+            row=0, column=1, padx=(12, 0))
+
+    def sliced_note(parent, r, why):
+        ttk.Label(parent, foreground="#555", wraplength=560, justify="left", text=(
+            why + " so this test is sliced for you with QIDI Studio and saved as ready-to-print G-code. "
+            "QIDI Studio can preview it but can't send it, so use \"Generate & send to printer\" or copy it "
+            "to the printer yourself." if can_slice else
+            "QIDI Studio wasn't found. It's needed to slice this test.")).grid(
+            row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+    send_row(r_tab, 4)
     save_row(r_tab, 5, "r_output", "gcode")
-    ttk.Label(r_tab, foreground="#555", wraplength=560, justify="left", text=(
-        "QIDI Studio can't change retraction by height, so this test is sliced for you with QIDI Studio and "
-        "saved as ready-to-print G-code. QIDI Studio can preview it but can't send it, so use "
-        "\"Generate & send to printer\" or copy it to the printer yourself." if can_slice else
-        "QIDI Studio wasn't found. It's needed to slice the retraction test.")).grid(
-        row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
+    sliced_note(r_tab, 6, "QIDI Studio can't change retraction by height,")
+
+    # Flow rate tab
+    f_tab = ttk.Frame(tabs, padding=10)
+    f_tab.columnconfigure(1, weight=1)
+    tabs.insert(1, f_tab, text="Flow rate")  # suggested order: temperature, flow, retraction
+    spin_row(f_tab, 0, "Flow change", [("f_start", "From", -50, 50, 1), ("f_end", "To", -50, 50, 1),
+                                       ("f_step", "Step", 0.5, 20, 0.5)], "%",
+             [("Coarse", lambda: set_flow_range(-20, 20, 5)), ("Fine", lambda: set_flow_range(-5, 5, 1))])
+    ttk.Label(f_tab, textvariable=v["f_summary"], foreground="#555", wraplength=560, justify="left").grid(
+        row=1, column=1, columnspan=2, sticky="w", pady=(2, 8))
+    spin_row(f_tab, 2, "Current flow", [("f_base", "", 0.5, 1.5, 0.01)],
+             "  (the filament's flow ratio; patches are labelled with the result)")
+    spin_row(f_tab, 3, "Nozzle", [("f_temp", "", 100, 500, 5)], "°C")
+    send_row(f_tab, 4)
+    save_row(f_tab, 5, "f_output", "gcode")
+    sliced_note(f_tab, 6, "QIDI Studio prints concentric top surfaces from the inside out,")
+
+    # Flow calculator: current flow × (1 + best patch's change).
+    ttk.Separator(f_tab).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(10, 6))
+    label(f_tab, "Calculator", 8)
+    calc = ttk.Frame(f_tab)
+    calc.grid(row=8, column=1, columnspan=2, sticky="w")
+    ttk.Label(calc, text="Best patch").grid(row=0, column=0, padx=(0, 4))
+    calc_spin = ttk.Spinbox(calc, textvariable=v["c_offset"], from_=-50, to=50, increment=1, width=6)
+    calc_spin.grid(row=0, column=1)
+    # Recalculate whenever either number changes, however it was changed.
+    for key in ("c_offset", "f_base"):
+        v[key].trace_add("write", lambda *_: update_calculator())
+    ttk.Label(calc, text="%  →  new flow ratio").grid(row=0, column=2, padx=(4, 4))
+    ttk.Label(calc, textvariable=v["c_result"], font=("TkDefaultFont", 10, "bold")).grid(row=0, column=3)
+    ttk.Button(calc, text="Use it for a fine pass", command=lambda: use_calculated_flow()).grid(
+        row=0, column=4, padx=(12, 0))
+    ttk.Label(f_tab, foreground="#555", wraplength=560, justify="left", text=(
+        "Enter the flow change of your best patch (this also works with QIDI Studio's own flow test). "
+        "It's worked out from the current flow above.")).grid(row=9, column=1, columnspan=2, sticky="w")
+    v["c_offset"].set("0")
 
     btns = ttk.Frame(frm)
     btns.grid(row=row, column=0, columnspan=3, sticky="e", pady=(10, 0))
@@ -291,39 +384,67 @@ def run_gui():
     ttk.Label(frm, textvariable=status, wraplength=620, justify="left").grid(
         row=row, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
-    auto = {"output": "", "r_output": ""}
+    auto = {"output": "", "r_output": "", "f_output": ""}
 
     def store():
         return state["store"]
 
-    def retraction_tab():
-        return tabs.index(tabs.select()) == 1
+    def current_tab():
+        return ("temperature", "flow", "retraction")[tabs.index(tabs.select())]
+
+    def sliced_tab():
+        return current_tab() != "temperature"
 
     def network_printers():
         st = store()
         return st.network_printers() if st else []
 
     def update_buttons(_e=None):
-        ok = not state["busy"] and (can_slice or not retraction_tab())
+        ok = not state["busy"] and (can_slice or not sliced_tab())
         gen_btn.state(["!disabled"] if ok else ["disabled"])
         open_btn.state(["!disabled"] if ok and studio_command() else ["disabled"])
-        if retraction_tab():
+        if sliced_tab():
             send_btn.grid()
-            send_btn.state(["!disabled"] if ok and v["r_send"].get() else ["disabled"])
+            has_printer = v["r_send"].get() not in ("", NO_PRINTER)
+            send_btn.state(["!disabled"] if ok and has_printer else ["disabled"])
         else:
             send_btn.grid_remove()
 
     def load_network_printers():
         names = [p.get("name", "?") for p in network_printers()]
-        send_combo["values"] = names
         if v["r_send"].get() not in names:
-            v["r_send"].set(names[0] if names else "")
-        if not names:
-            send_combo.set("(none set up in QIDI Studio)")
-            send_combo.state(["disabled"])
-            v["r_send"].set("")
-        else:
-            send_combo.state(["!disabled", "readonly"])
+            v["r_send"].set(names[0] if names else NO_PRINTER)
+        for combo in send_combos:
+            combo["values"] = names
+            combo.state(["!disabled", "readonly"] if names else ["disabled"])
+
+    def set_flow_range(start, end, step):
+        v["f_start"].set("%g" % start)
+        v["f_end"].set("%g" % end)
+        v["f_step"].set("%g" % step)
+        update_summaries()
+
+    def calculated_flow():
+        try:
+            return ft.new_flow(float(v["f_base"].get()), float(v["c_offset"].get()))
+        except ValueError:
+            return None
+
+    def update_calculator():
+        new = calculated_flow()
+        v["c_result"].set(fmt_flow(new) if new else "—")
+
+    def use_calculated_flow():
+        new = calculated_flow()
+        if not new:
+            messagebox.showerror(APP_NAME, "Enter a number for the current flow and the best patch's change.")
+            return
+        v["f_base"].set(fmt_flow(new))
+        v["c_offset"].set("0")
+        set_flow_range(-5, 5, 1)
+        update_calculator()
+        status.set("Current flow set to %s with a fine range (±5 %%). Generate again to narrow it down."
+                   % fmt_flow(new))
 
     def load_store():
         try:
@@ -375,6 +496,8 @@ def run_gui():
             qp.first(cfg.get("nozzle_temperature_range_high"), "?"), qp.first(cfg.get("nozzle_temperature"), "?"),
             rt.fmt(rt.preset_retraction(st, v["printer"].get(), f)) if v["printer"].get() else "?"))
         v["r_temp"].set(str(int(qp.as_float(cfg.get("nozzle_temperature"), 210))))
+        v["f_temp"].set(v["r_temp"].get())
+        v["f_base"].set(fmt_flow(ft.preset_flow(st, f)))
         apply_filament_range()
 
     def apply_filament_range():
@@ -436,6 +559,23 @@ def run_gui():
         except ValueError as e:
             msg = str(e) if "step" in str(e) or "negative" in str(e) else "Enter numbers"
         v["r_summary"].set(msg)
+        # Flow rate test
+        try:
+            offs = ft.offsets(*[float(v[k].get()) for k in ("f_start", "f_end", "f_step")])
+            base = float(v["f_base"].get())
+            width, depth = ft.footprint(len(offs))
+            msg = "%d patches (%g × %g mm): %s" % (len(offs), width, depth,
+                                                  " → ".join(ft.flow_label(r) for r in ft.ratios(base, offs)))
+            if st and v["printer"].get():
+                x0, y0, x1, y1 = qp.bed_shape(st.resolve("machine", v["printer"].get()))
+                if width > x1 - x0 - 10 or depth > y1 - y0 - 10:
+                    msg += "   ⚠ too big for the bed, use fewer steps"
+            if st and v["filament"].get():
+                auto_output("f_output", default_flow_output(st, v["filament"].get(), offs))
+        except ValueError as e:
+            msg = str(e) if "%" in str(e) else "Enter numbers"
+        v["f_summary"].set(msg)
+        update_calculator()
 
     def browse_dir():
         d = filedialog.askdirectory(initialdir=v["dir"].get() or None, title="QIDI Studio data folder")
@@ -475,9 +615,9 @@ def run_gui():
             return
         presets = dict(store=st, machine=v["printer"].get(), process=v["process"].get(),
                        filament=v["filament"].get())
-        if not retraction_tab():
+        if not sliced_tab():
             try:
-                temps = tt.temperatures(*[int(v[k].get()) for k in ("start", "end", "step")])
+                temps = tt.temperatures(*[number(k) for k in ("start", "end", "step")])
                 out = v["output"].get().strip() or default_output(st, presets["filament"], temps)
                 if not out.lower().endswith(".3mf"):
                     out += ".3mf"
@@ -489,13 +629,34 @@ def run_gui():
                 r["path"], r["floors"], r["height"], r["command"],
                 ", ".join("%g→%d°C" % c for c in r["changes"])), None, open_after)
 
+        # The retraction and flow tests are sliced with QIDI Studio, then adjusted.
         try:
-            values = rt.lengths(*[float(v[k].get()) for k in ("r_start", "r_end", "r_step")])
-            band = float(v["r_band"].get())
-            temp = int(float(v["r_temp"].get())) if v["r_temp"].get().strip() else None
+            if current_tab() == "retraction":
+                values = rt.lengths(*[number(k) for k in ("r_start", "r_end", "r_step")])
+                band = number("r_band")
+                temp = number("r_temp", optional=True)
+                temp = None if temp is None else int(temp)
+                out = v["r_output"].get().strip() or default_retraction_output(st, presets["filament"], values)
+
+                def make(progress):
+                    r = rt.generate(out, values, band_h=band, nozzle_temp=temp, progress=progress, **presets)
+                    return "Saved %s\n%d bands of %g mm (%g mm tall) at %s °C. Retraction from the bottom: %s mm." % (
+                        r["path"], r["bands"], band, r["height"], r["temperature"],
+                        ", ".join(rt.fmt(x) for x in values))
+            else:
+                offs = ft.offsets(*[number(k) for k in ("f_start", "f_end", "f_step")])
+                base = number("f_base")
+                temp = number("f_temp", optional=True)
+                temp = None if temp is None else int(temp)
+                out = v["f_output"].get().strip() or default_flow_output(st, presets["filament"], offs)
+
+                def make(progress):
+                    r = ft.generate(out, offs, base_flow=base, nozzle_temp=temp, progress=progress, **presets)
+                    return ("Saved %s\n%d patches at %s °C, flow ratios from the back left: %s. Pick the patch with "
+                            "the smoothest centre and set the filament's flow ratio to its number." % (
+                                r["path"], r["patches"], r["temperature"], ", ".join(r["labels"])))
         except ValueError as e:
             return finish(None, None, str(e), False)
-        out = v["r_output"].get().strip() or default_retraction_output(st, presets["filament"], values)
         if not out.lower().endswith(".gcode"):
             out += ".gcode"
         target = None
@@ -517,11 +678,7 @@ def run_gui():
 
         def work():
             try:
-                r = rt.generate(out, values, band_h=band, nozzle_temp=temp,
-                                progress=lambda msg: messages.put(("progress", msg)), **presets)
-                summary = "Saved %s\n%d bands of %g mm (%g mm tall) at %s °C. Retraction from the bottom: %s mm." % (
-                    r["path"], r["bands"], band, r["height"], r["temperature"],
-                    ", ".join(rt.fmt(x) for x in values))
+                summary = make(lambda msg: messages.put(("progress", msg)))
                 if target:
                     messages.put(("progress", "Sending to %s…" % pu.describe(target)))
                     pu.upload(target, out, start=print_now)

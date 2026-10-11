@@ -30,7 +30,7 @@ def base_url(printer):
 
 
 def _multipart(fields, file_field, filename, data):
-    boundary = "----qidi-temp-tower-" + uuid.uuid4().hex
+    boundary = "----qidi-studio-calibration-" + uuid.uuid4().hex
     parts = []
     for name, value in fields.items():
         parts.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n"

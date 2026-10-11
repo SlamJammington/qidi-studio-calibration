@@ -217,6 +217,21 @@ def text_mesh(text, cx, cz, max_width, height=None):
     return out
 
 
+def raised_text_mesh(text, cx, cy, z0, max_width, height, raise_h=0.6):
+    """Text standing `raise_h` mm up from a flat top surface at z0, readable from above.
+
+    The glyph prisms are made for a front face (depth along +y); this lays them
+    flat: their up direction becomes +y and their depth becomes height above z0.
+    They dip 0.05 mm into the surface so the two solids overlap rather than touch.
+    """
+    font = digits()
+    span = font["depth"] + font["overshoot"]
+    k = (raise_h + 0.05) / span
+    flat = text_mesh(text, 0.0, 0.0, max_width, height)
+    flat.verts = [(cx + x, cy + z, z0 - 0.05 + (font["depth"] - y) * k) for x, y, z in flat.verts]
+    return flat
+
+
 def label_mesh(text, z0):
     """Engraving prisms for `text`, centred on the front of the label block of the floor at z0."""
     return text_mesh(text, BLOCK_W / 2, z0 + FLOOR_H / 2 - BRIDGE_T / 2, LABEL_MAX_WIDTH)

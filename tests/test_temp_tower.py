@@ -185,7 +185,7 @@ class CliTests(unittest.TestCase):
     def test_cli_defaults_to_selected_presets(self):
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "cli.3mf")
-            r = subprocess.run([sys.executable, os.path.join(ROOT, "qidi_temp_tower.py"), "--qidi-dir", FIXTURE,
+            r = subprocess.run([sys.executable, os.path.join(ROOT, "qidi_studio_calibration.py"), "--qidi-dir", FIXTURE,
                                 "-o", out], capture_output=True, text=True, encoding="utf-8",
                                env=dict(os.environ, PYTHONIOENCODING="utf-8"))
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -195,7 +195,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("7 floors", r.stdout)  # My PLA's 225 -> 195 range in 5 degree steps
 
     def test_cli_list(self):
-        r = subprocess.run([sys.executable, os.path.join(ROOT, "qidi_temp_tower.py"), "--qidi-dir", FIXTURE,
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "qidi_studio_calibration.py"), "--qidi-dir", FIXTURE,
                             "--list", "filament"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.split(), ["My", "PLA", "Test", "PLA"])

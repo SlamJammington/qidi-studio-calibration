@@ -20,11 +20,11 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            asset: QidiTempTower-windows.exe
+            asset: QidiStudioCalibration-windows.exe
           - os: macos-latest
-            asset: QidiTempTower-macos.zip
+            asset: QidiStudioCalibration-macos.zip
           - os: ubuntu-latest
-            asset: QidiTempTower-linux.tar.gz
+            asset: QidiStudioCalibration-linux.tar.gz
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -41,9 +41,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          v=$(python -c "import qidi_temp_tower as q; print(q.__version__)")
+          v=$(python -c "import qidi_studio_calibration as q; print(q.__version__)")
           if [ "v$v" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME doesn't match __version__ = $v in qidi_temp_tower.py"
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match __version__ = $v in qidi_studio_calibration.py"
             exit 1
           fi
 
@@ -56,18 +56,18 @@ jobs:
       - name: Build
         run: |
           python -m pip install pyinstaller==6.22.3
-          pyinstaller --noconfirm qidi_temp_tower.spec
+          pyinstaller --noconfirm qidi_studio_calibration.spec
 
       - name: Smoke test the build
         shell: bash
         run: |
           case "$RUNNER_OS" in
-            Windows) bin=dist/QidiTempTower.exe ;;
-            macOS)   bin=dist/QidiTempTower.app/Contents/MacOS/QidiTempTower ;;
-            *)       bin=dist/QidiTempTower ;;
+            Windows) bin=dist/QidiStudioCalibration.exe ;;
+            macOS)   bin=dist/QidiStudioCalibration.app/Contents/MacOS/QidiStudioCalibration ;;
+            *)       bin=dist/QidiStudioCalibration ;;
           esac
           "$bin" --version | tee version.txt
-          grep -q "$(python -c 'import qidi_temp_tower as q; print(q.__version__)')" version.txt
+          grep -q "$(python -c 'import qidi_studio_calibration as q; print(q.__version__)')" version.txt
           "$bin" --qidi-dir tests/fixtures/QIDIStudio -o smoke.3mf
           python -c "import zipfile; z = zipfile.ZipFile('smoke.3mf'); assert 'Metadata/custom_gcode_per_layer.xml' in z.namelist(); print('3MF ok')"
 
@@ -76,9 +76,9 @@ jobs:
         run: |
           cd dist
           case "$RUNNER_OS" in
-            Windows) mv QidiTempTower.exe "${{ matrix.asset }}" ;;
-            macOS)   ditto -c -k --keepParent QidiTempTower.app "${{ matrix.asset }}" ;;
-            *)       tar -czf "${{ matrix.asset }}" QidiTempTower ;;
+            Windows) mv QidiStudioCalibration.exe "${{ matrix.asset }}" ;;
+            macOS)   ditto -c -k --keepParent QidiStudioCalibration.app "${{ matrix.asset }}" ;;
+            *)       tar -czf "${{ matrix.asset }}" QidiStudioCalibration ;;
           esac
 
       - name: Record build provenance

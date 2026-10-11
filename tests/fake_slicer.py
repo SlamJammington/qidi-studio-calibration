@@ -12,7 +12,7 @@ import sys
 import zipfile
 
 
-def gcode(retraction, height, layer=0.2, extra=0.0, nozzle="210"):
+def gcode(retraction, height, layer=0.2, extra=0.0, nozzle="210", top=False):
     lines = ["; HEADER_BLOCK_START", "; total layer number: %d" % round(height / layer), "; HEADER_BLOCK_END",
              "M83", "G1 E5 F80 ; prime in the start G-code, must stay untouched",
              "; MACHINE_START_GCODE_END"]
@@ -26,10 +26,33 @@ def gcode(retraction, height, layer=0.2, extra=0.0, nozzle="210"):
                   "G1 E%s F1800" % round(retraction + extra, 5),
                   "G1 X70 Y10 E1.2"]
         z += layer
+    if top:
+        lines += top_surface()
     lines += ["; MACHINE_END_GCODE_START", "G1 E-3 F1800 ; end G-code retraction, must stay untouched",
               "; CONFIG_BLOCK_START", "; nozzle_temperature = %s" % nozzle,
               "; retraction_length = %s" % retraction, "; CONFIG_BLOCK_END", ""]
     return "\n".join(lines)
+
+
+def top_surface(cx=100.0, cy=100.0, z=1.6, rings=(0.4, 0.8, 1.2, 1.6)):
+    """A concentric top surface the way QIDI Studio prints it: inside out, a hop between
+    rings, then a wipe along the outermost ring."""
+    r0 = rings[0]
+    lines = ["G1 X%g Y%g Z%g F30000" % (cx + r0, cy, z + 0.4), "G1 Z%g" % z, "G1 E.8 F1800",
+             "; FEATURE: Top surface", "; LINE_WIDTH: 0.42", "G1 F9000", "M204 S2000"]
+    for k, r in enumerate(rings):
+        if k:
+            lines += ["M204 S10000", "G1 X%g Y%g F30000" % (cx + r, cy), "; LINE_WIDTH: 0.4%d" % k,
+                      "G1 F9000", "M204 S2000"]
+        e = round(2 * r * 0.05, 5)
+        lines += ["G1 X%g Y%g E%s" % (cx + r, cy - r, e / 2), "G1 X%g Y%g E%s" % (cx - r, cy - r, e),
+                  "G1 X%g Y%g E%s" % (cx - r, cy + r, e), "G1 X%g Y%g E%s" % (cx + r, cy + r, e),
+                  "G1 X%g Y%g E%s" % (cx + r, cy, e / 2)]
+    rl = rings[-1]
+    lines += ["M204 S10000", "; WIPE_START", "G1 F9000", "G1 X%g Y%g E-.38" % (cx + rl, cy - 1),
+              "G1 X%g Y%g E-.38" % (cx + rl, cy - 1.6), "; WIPE_END", "G1 E-.04 F1800",
+              "G1 X%g Y%g Z%g F30000" % (cx + 20, cy, z + 0.4)]
+    return lines
 
 
 def tiny_png(w=4, h=3):
@@ -51,10 +74,12 @@ def main(argv):
     with zipfile.ZipFile(project) as z:
         cfg = json.loads(z.read("Metadata/project_settings.config"))
         entries = {n: z.read(n) for n in z.namelist()}
-    retraction = float(cfg["filament_retraction_length"][0])
     height = float(os.environ.get("FAKE_SLICER_HEIGHT", "11"))
     extra = float(os.environ.get("FAKE_SLICER_EXTRA", "0"))
-    code = gcode(retraction, height, extra=extra, nozzle=cfg.get("nozzle_temperature", ["210"])[0]).encode()
+    retraction = float(cfg.get("filament_retraction_length", ["0.8"])[0]) if cfg.get(
+        "filament_retraction_length", ["nil"])[0] != "nil" else 0.8
+    code = gcode(retraction, height, extra=extra, nozzle=cfg.get("nozzle_temperature", ["210"])[0],
+                 top=os.environ.get("FAKE_SLICER_TOP") == "1").encode()
     entries["Metadata/plate_1.gcode"] = code
     entries["Metadata/plate_1.gcode.md5"] = hashlib.md5(code).hexdigest().upper().encode()
     entries["Metadata/plate_1.png"] = tiny_png()

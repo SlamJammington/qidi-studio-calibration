@@ -124,69 +124,98 @@ MODEL_HEAD = ('<?xml version="1.0" encoding="UTF-8"?>\n'
               'requiredextensions="p">\n')
 
 
-def write_project(path, parts, *, center, store=None, machine=None, process=None, filament=None,
-                  embed_settings=True, description="", layer_gcodes=(), config_overrides=None):
-    """Write `parts` ([(name, subtype, Mesh)], centred on x/y, base at z=0) as one object.
+def write_project(path, parts=None, *, center, objects=None, store=None, machine=None, process=None,
+                  filament=None, embed_settings=True, description="", layer_gcodes=(), config_overrides=None):
+    """Write a project with one object made of `parts`, or several `objects`.
 
+    parts: [(name, subtype, Mesh)], centred on x/y with the base at z=0.
+    objects: [{"name", "parts", "offset": (dx, dy) from the plate centre, "settings": {key: value}}],
+        each its own object with optional per-object settings (e.g. print_flow_ratio).
     layer_gcodes: [(print_z, gcode)] custom G-code markers.
     config_overrides: settings to change in the embedded presets.
     """
-    app_version = store.app_version() if store else "02.07.02.60"
-    cx, cy = center
-    obj_id = len(parts) + 1
-    today = datetime.date.today().isoformat()
-    uids = [str(uuid.uuid4()) for _ in range(len(parts) + 3)]
-
-    sub = [MODEL_HEAD, ' <metadata name="QIDIStudio:3mfVersion">1</metadata>\n <resources>\n']
-    for i, (_, _, mesh) in enumerate(parts, 1):
-        sub.append(_mesh_xml(i, mesh, uids[i]))
-    sub.append(' </resources>\n <build/>\n</model>\n')
-
     name = os.path.basename(path)
     for ext in (".3mf", ".gcode"):
         if name.lower().endswith(ext):
             name = name[:-len(ext)]
+    if objects is None:
+        objects = [{"name": name, "parts": parts}]
+    app_version = store.app_version() if store else "02.07.02.60"
+    cx, cy = center
+    today = datetime.date.today().isoformat()
+
+    # Every part mesh lives in 3D/Objects/object_1.model with ids 1..N; each object
+    # is a set of components pointing at its parts, numbered after the meshes.
+    mesh_id = 0
+    for obj in objects:
+        obj["_mesh_ids"] = []
+        for _ in obj["parts"]:
+            mesh_id += 1
+            obj["_mesh_ids"].append(mesh_id)
+    for i, obj in enumerate(objects):
+        obj["_id"] = mesh_id + 1 + i
+
+    sub = [MODEL_HEAD, ' <metadata name="QIDIStudio:3mfVersion">1</metadata>\n <resources>\n']
+    for obj in objects:
+        for mid, (_, _, mesh) in zip(obj["_mesh_ids"], obj["parts"]):
+            sub.append(_mesh_xml(mid, mesh, str(uuid.uuid4())))
+    sub.append(' </resources>\n <build/>\n</model>\n')
+
     main = [MODEL_HEAD]
     for k, v in (("Application", "QIDIStudio-" + app_version), ("CreationDate", today),
                  ("ModificationDate", today), ("QIDIStudio:3mfVersion", "1"), ("Title", name),
                  ("Description", description)):
         main.append(' <metadata name="%s">%s</metadata>\n' % (k, escape(v)))
-    main.append(' <resources>\n  <object id="%d" p:UUID="%s" type="model">\n   <components>\n'
-                % (obj_id, uids[0]))
-    for i in range(1, len(parts) + 1):
-        main.append('    <component p:path="/3D/Objects/object_1.model" objectid="%d" '
-                    'p:UUID="%s" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n' % (i, str(uuid.uuid4())))
-    main.append('   </components>\n  </object>\n </resources>\n')
-    main.append(' <build p:UUID="%s">\n  <item objectid="%d" p:UUID="%s" '
-                'transform="1 0 0 0 1 0 0 0 1 %.4f %.4f 0" printable="1"/>\n </build>\n</model>\n'
-                % (uids[-2], obj_id, uids[-1], cx, cy))
+    main.append(' <resources>\n')
+    for obj in objects:
+        main.append('  <object id="%d" p:UUID="%s" type="model">\n   <components>\n'
+                    % (obj["_id"], str(uuid.uuid4())))
+        for mid in obj["_mesh_ids"]:
+            main.append('    <component p:path="/3D/Objects/object_1.model" objectid="%d" '
+                        'p:UUID="%s" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n' % (mid, str(uuid.uuid4())))
+        main.append('   </components>\n  </object>\n')
+    main.append(' </resources>\n <build p:UUID="%s">\n' % str(uuid.uuid4()))
+    for obj in objects:
+        dx, dy = obj.get("offset", (0.0, 0.0))
+        main.append('  <item objectid="%d" p:UUID="%s" transform="1 0 0 0 1 0 0 0 1 %.4f %.4f 0" '
+                    'printable="1"/>\n' % (obj["_id"], str(uuid.uuid4()), cx + dx, cy + dy))
+    main.append(' </build>\n</model>\n')
 
-    ms = ['<?xml version="1.0" encoding="UTF-8"?>\n<config>\n  <object id="%d">\n' % obj_id,
-          '    <metadata key="name" value=%s/>\n' % quoteattr(name),
-          '    <metadata key="extruder" value="1"/>\n',
-          # Calibration objects test overhangs, bridges and travel; supports would get in the way.
-          '    <metadata key="enable_support" value="0"/>\n']
-    for i, (pname, subtype, mesh) in enumerate(parts, 1):
-        ms.append('    <part id="%d" subtype="%s">\n'
-                  '      <metadata key="name" value=%s/>\n'
-                  '      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n'
-                  '      <mesh_stat face_count="%d" edges_fixed="0" degenerate_facets="0" '
-                  'facets_removed="0" facets_reversed="0" backwards_edges="0"/>\n'
-                  '    </part>\n' % (i, subtype, quoteattr(pname), len(mesh.tris)))
-    ms.append('  </object>\n  <plate>\n'
+    ms = ['<?xml version="1.0" encoding="UTF-8"?>\n<config>\n']
+    for obj in objects:
+        ms.append('  <object id="%d">\n'
+                  '    <metadata key="name" value=%s/>\n'
+                  '    <metadata key="extruder" value="1"/>\n'
+                  # Calibration objects test overhangs, bridges and travel; supports would get in the way.
+                  '    <metadata key="enable_support" value="0"/>\n' % (obj["_id"], quoteattr(obj["name"])))
+        for key, value in (obj.get("settings") or {}).items():
+            ms.append('    <metadata key=%s value=%s/>\n' % (quoteattr(key), quoteattr(str(value))))
+        for mid, (pname, subtype, mesh) in zip(obj["_mesh_ids"], obj["parts"]):
+            ms.append('    <part id="%d" subtype="%s">\n'
+                      '      <metadata key="name" value=%s/>\n'
+                      '      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n'
+                      '      <mesh_stat face_count="%d" edges_fixed="0" degenerate_facets="0" '
+                      'facets_removed="0" facets_reversed="0" backwards_edges="0"/>\n'
+                      '    </part>\n' % (mid, subtype, quoteattr(pname), len(mesh.tris)))
+        ms.append('  </object>\n')
+    ms.append('  <plate>\n'
               '    <metadata key="plater_id" value="1"/>\n'
               '    <metadata key="plater_name" value=""/>\n'
               '    <metadata key="locked" value="false"/>\n'
               '    <metadata key="filament_map_mode" value="Auto For Flush"/>\n'
-              '    <metadata key="filament_maps" value="1"/>\n'
-              '    <model_instance>\n'
-              '      <metadata key="object_id" value="%d"/>\n'
-              '      <metadata key="instance_id" value="0"/>\n'
-              '      <metadata key="identify_id" value="%d"/>\n'
-              '    </model_instance>\n  </plate>\n'
-              '  <assemble>\n   <assemble_item object_id="%d" instance_id="0" '
-              'transform="1 0 0 0 1 0 0 0 1 %.4f %.4f 0" offset="0 0 0" />\n  </assemble>\n'
-              '</config>\n' % (obj_id, 1000 + obj_id, obj_id, cx, cy))
+              '    <metadata key="filament_maps" value="1"/>\n')
+    for obj in objects:
+        ms.append('    <model_instance>\n'
+                  '      <metadata key="object_id" value="%d"/>\n'
+                  '      <metadata key="instance_id" value="0"/>\n'
+                  '      <metadata key="identify_id" value="%d"/>\n'
+                  '    </model_instance>\n' % (obj["_id"], 1000 + obj["_id"]))
+    ms.append('  </plate>\n  <assemble>\n')
+    for obj in objects:
+        dx, dy = obj.get("offset", (0.0, 0.0))
+        ms.append('   <assemble_item object_id="%d" instance_id="0" transform="1 0 0 0 1 0 0 0 1 %.4f %.4f 0" '
+                  'offset="0 0 0" />\n' % (obj["_id"], cx + dx, cy + dy))
+    ms.append('  </assemble>\n</config>\n')
 
     gc = ['<?xml version="1.0" encoding="utf-8"?>\n<custom_gcodes_per_layer>\n<plate>\n'
           '<plate_info id="1"/>\n']
