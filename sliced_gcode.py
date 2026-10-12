@@ -12,6 +12,7 @@ import tempfile
 import zipfile
 
 import project3mf
+import qidi_box
 import studio
 
 START_MARK = "; MACHINE_START_GCODE_END"
@@ -93,11 +94,28 @@ def slice_to_gcode(project_kwargs, progress=None):
     return gcode, png
 
 
-def save_gcode(path, gcode, png=b"", header=""):
-    """Write G-code with the plate picture as a thumbnail and `header` lines after the header block."""
+def save_gcode(path, gcode, png=b"", header="", start_lines=()):
+    """Write G-code with the plate picture as a thumbnail and `header` lines after the header block.
+
+    start_lines run first when the print starts, before the printer's start G-code
+    (e.g. choosing which QIDI Box slot to load from)."""
     marker = "; HEADER_BLOCK_END\n"
     gcode = gcode.replace(marker, marker + thumbnail_block(png) + header, 1)
+    if start_lines:
+        block = "".join(line + "\n" for line in start_lines)
+        start = "; EXECUTABLE_BLOCK_START\n"
+        if start in gcode:
+            gcode = gcode.replace(start, start + block, 1)
+        else:
+            gcode = gcode.replace(marker, marker + block, 1)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(gcode)
     os.replace(tmp, path)
+
+
+def box_start_lines(box_slot):
+    """Start-of-print lines that make the test load from QIDI Box slot `box_slot` (0-based), or none."""
+    if box_slot is None:
+        return []
+    return ["; QIDI Box: print from slot %d" % (box_slot + 1), qidi_box.select_slot_gcode(box_slot)]

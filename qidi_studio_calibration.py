@@ -9,12 +9,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import qidi_profiles as qp  # noqa: E402
 import printer_upload as pu  # noqa: E402
 import flow_test as ft  # noqa: E402
+import qidi_box  # noqa: E402
 import retraction_test as rt  # noqa: E402
 import temp_tower as tt  # noqa: E402
 from studio import cli_command, open_in_studio, studio_command  # noqa: E402
 from tower_geometry import HERE as DATA_DIR  # noqa: E402
 
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 APP_NAME = "QIDI Studio Calibration"
 NO_PRINTER = "(no network printer set up in QIDI Studio)"
 
@@ -110,6 +111,8 @@ def run_cli(argv):
     ap.add_argument("--send", nargs="?", const="", metavar="PRINTER",
                     help="retraction/flow: upload the G-code to a network printer saved in QIDI Studio "
                          "(default: the first)")
+    ap.add_argument("--box-slot", type=int, metavar="N",
+                    help="retraction/flow: print from QIDI Box slot N (1-16), the way QIDI Studio picks a slot")
     ap.add_argument("--print-now", action="store_true",
                     help="retraction/flow: with --send, start printing once uploaded")
     ap.add_argument("--list", choices=["printer", "process", "filament"], help="list presets and exit")
@@ -138,19 +141,22 @@ def run_cli(argv):
 
     if a.test in ("retraction", "flow"):
         target = pick_network_printer(store, a.send) if a.send is not None else None
+        if a.box_slot is not None and not 1 <= a.box_slot <= 16:
+            raise ValueError("--box-slot must be between 1 and 16")
+        box_slot = a.box_slot - 1 if a.box_slot else None
         if a.test == "retraction":
             d_start, d_end, d_step = rt.defaults(store, machine)
             values = rt.lengths(pick(a.start, d_start), pick(a.end, d_end), pick(a.step, d_step))
             out = a.output or default_retraction_output(store, filament, values)
             r = rt.generate(out, values, store=store, machine=machine, process=process, filament=filament,
-                            band_h=a.band_height, nozzle_temp=a.temp, progress=print)
+                            band_h=a.band_height, nozzle_temp=a.temp, progress=print, box_slot=box_slot)
             print("Wrote %s\n  %d bands of %g mm (%g mm tall), retraction from the bottom: %s mm" % (
                 r["path"], r["bands"], a.band_height, r["height"], ", ".join(rt.fmt(x) for x in values)))
         else:
             offs = ft.offsets(pick(a.start, -20), pick(a.end, 20), pick(a.step, 5))
             out = a.output or default_flow_output(store, filament, offs)
             r = ft.generate(out, offs, store=store, machine=machine, process=process, filament=filament,
-                            base_flow=a.flow, nozzle_temp=a.temp, progress=print)
+                            base_flow=a.flow, nozzle_temp=a.temp, progress=print, box_slot=box_slot)
             print("Wrote %s\n  %d patches, flow ratios from the back left: %s" % (
                 r["path"], r["patches"], ", ".join(r["labels"])))
         if target:
@@ -197,7 +203,7 @@ def run_gui():
                                      "start", "end", "step", "summary", "output",
                                      "r_start", "r_end", "r_step", "r_band", "r_temp", "r_summary", "r_output",
                                      "r_send", "f_start", "f_end", "f_step", "f_base", "f_temp", "f_summary",
-                                     "f_output", "c_offset", "c_result")}
+                                     "f_output", "c_offset", "c_result", "box_slot")}
     v_wait = tk.BooleanVar(value=False)
     v_embed = tk.BooleanVar(value=True)
     v_all = tk.BooleanVar(value=False)
@@ -312,17 +318,25 @@ def run_gui():
     spin_row(r_tab, 3, "Nozzle", [("r_temp", "", 100, 500, 5)],
              "°C   (use the best floor from your temperature tower)")
     send_combos = []
+    box_frames = []
 
     def send_row(parent, r):
-        # Both sliced tests share the chosen network printer and the "start printing" choice.
-        label(parent, "Send to", r)
+        # Both sliced tests share the chosen network printer, the "start printing" choice
+        # and the QIDI Box slot to print from.
+        ttk.Label(parent, text="Send to").grid(row=r, column=0, sticky="nw", padx=(0, 8), pady=(5, 3))
         box = ttk.Frame(parent)
         box.grid(row=r, column=1, columnspan=2, sticky="w")
         combo = ttk.Combobox(box, textvariable=v["r_send"], state="readonly", width=30)
-        combo.grid(row=0, column=0)
+        combo.grid(row=0, column=0, sticky="w")
         send_combos.append(combo)
+        combo.bind("<<ComboboxSelected>>", lambda e: (refresh_box(), update_buttons()))
         ttk.Checkbutton(box, text="Start printing right away", variable=v_print_now).grid(
             row=0, column=1, padx=(12, 0))
+        # Filled in (and shown) once a QIDI Box is found on the chosen printer.
+        slots = ttk.Frame(box)
+        slots.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        slots.grid_remove()
+        box_frames.append(slots)
 
     def sliced_note(parent, r, why):
         ttk.Label(parent, foreground="#555", wraplength=560, justify="left", text=(
@@ -414,6 +428,73 @@ def run_gui():
         for combo in send_combos:
             combo["values"] = names
             combo.state(["!disabled", "readonly"] if names else ["disabled"])
+        refresh_box()
+
+    def refresh_box():
+        """Look for a QIDI Box on the chosen network printer, in the background."""
+        state["box"] = None
+        show_box(None)
+        st = store()
+        name = v["r_send"].get()
+        target = next((p for p in network_printers() if p.get("name") == name), None) if st else None
+        if not target:
+            return
+        state["box_request"] = request = object()   # only the latest request may update the panel
+        replies = queue.Queue()
+
+        def work():
+            try:
+                replies.put(qidi_box.read_box(target, timeout=4))
+            except Exception:  # noqa: BLE001  (offline printer, not Klipper, ...: just no Box picker)
+                replies.put(None)
+
+        def poll():
+            try:
+                slots = replies.get_nowait()
+            except queue.Empty:
+                root.after(150, poll)
+                return
+            if state.get("box_request") is request:
+                state["box"] = slots
+                show_box(slots)
+
+        threading.Thread(target=work, daemon=True).start()
+        poll()
+
+    def show_box(slots):
+        for frame in box_frames:
+            for child in frame.winfo_children():
+                child.destroy()
+            if not slots:
+                frame.grid_remove()
+                continue
+            ttk.Label(frame, text="Print from QIDI Box slot:").grid(row=0, column=0, columnspan=4, sticky="w")
+            for i, slot in enumerate(slots):
+                row, col = 1 + i // 2, (i % 2) * 2
+                swatch = tk.Label(frame, width=2, relief="solid", borderwidth=1,
+                                  bg=slot.colour if slot.loaded and slot.colour else frame.winfo_toplevel().cget("bg"))
+                swatch.grid(row=row, column=col, padx=(0 if col == 0 else 16, 4), pady=1, sticky="w")
+                rb = ttk.Radiobutton(frame, text=slot.describe(), variable=v["box_slot"], value=str(slot.index))
+                rb.grid(row=row, column=col + 1, sticky="w")
+                if not slot.loaded:
+                    rb.state(["disabled"])
+            ttk.Button(frame, text="Refresh", command=refresh_box).grid(
+                row=1, column=4, rowspan=2, padx=(16, 0), sticky="n")
+            frame.grid()
+        if slots:
+            chosen = v["box_slot"].get()
+            if not any(str(s.index) == chosen and s.loaded for s in slots):
+                kind = ""
+                if store() and v["filament"].get():
+                    kind = qp.first(store().resolve("filament", v["filament"].get()).get("filament_type"), "")
+                best = qidi_box.default_slot(slots, kind)
+                v["box_slot"].set(str(best.index) if best else "")
+
+    def box_choice():
+        """The chosen Box slot (0-based), or None when there's no Box picker showing."""
+        slots = state.get("box") or []
+        chosen = v["box_slot"].get()
+        return next((s for s in slots if str(s.index) == chosen and s.loaded), None)
 
     def set_flow_range(start, end, step):
         v["f_start"].set("%g" % start)
@@ -636,7 +717,8 @@ def run_gui():
                 out = v["r_output"].get().strip() or default_retraction_output(st, presets["filament"], values)
 
                 def make(progress):
-                    r = rt.generate(out, values, band_h=band, nozzle_temp=temp, progress=progress, **presets)
+                    r = rt.generate(out, values, band_h=band, nozzle_temp=temp, progress=progress,
+                                    box_slot=slot_index, **presets)
                     return "Saved %s\n%d bands of %g mm (%g mm tall) at %s °C. Retraction from the bottom: %s mm." % (
                         r["path"], r["bands"], band, r["height"], r["temperature"],
                         ", ".join(rt.fmt(x) for x in values))
@@ -648,7 +730,8 @@ def run_gui():
                 out = v["f_output"].get().strip() or default_flow_output(st, presets["filament"], offs)
 
                 def make(progress):
-                    r = ft.generate(out, offs, base_flow=base, nozzle_temp=temp, progress=progress, **presets)
+                    r = ft.generate(out, offs, base_flow=base, nozzle_temp=temp, progress=progress,
+                                    box_slot=slot_index, **presets)
                     return ("Saved %s\n%d patches at %s °C, flow ratios from the back left: %s. Pick the patch with "
                             "the flattest ring where the two halves meet, and set the filament's flow ratio to its number." % (
                                 r["path"], r["patches"], r["temperature"], ", ".join(r["labels"])))
@@ -667,6 +750,8 @@ def run_gui():
                     "and the right filament is loaded." % pu.describe(target)):
                 return
         print_now = bool(target) and v_print_now.get()
+        slot = box_choice()
+        slot_index = slot.index if slot else None
         state["busy"] = True
         update_buttons()
         # Slicing takes a while, so it runs on a worker thread. Tk may only be used from
@@ -676,6 +761,8 @@ def run_gui():
         def work():
             try:
                 summary = make(lambda msg: messages.put(("progress", msg)))
+                if slot:
+                    summary += "\nPrints from QIDI Box %s." % slot.describe().replace("Slot", "slot", 1)
                 if target:
                     messages.put(("progress", "Sending to %s…" % pu.describe(target)))
                     pu.upload(target, out, start=print_now)

@@ -29,7 +29,7 @@ import re
 import project3mf
 import qidi_profiles as qp
 import tower_geometry as geo
-from sliced_gcode import END_MARK, START_MARK, body_extrusion, num, save_gcode, slice_to_gcode
+from sliced_gcode import box_start_lines, END_MARK, START_MARK, body_extrusion, num, save_gcode, slice_to_gcode
 
 PAD = 30.0          # pad diameter
 PAD_SEGMENTS = 96   # sides of the pad's circle (3.75 degrees each)
@@ -475,7 +475,7 @@ def top_surface_paths(gcode, min_size=PAD * 0.9):
 
 # ------------------------------------------------------------------ generate
 def generate(path, offs, *, store, machine, process, filament, base_flow=None, nozzle_temp=None,
-             progress=None):
+             progress=None, box_slot=None):
     """Slice the flow test and write it as ready-to-print G-code. Returns a dict describing it."""
     say = progress or (lambda msg: None)
     printer = project3mf.Printer(store, machine, process)
@@ -506,6 +506,6 @@ def generate(path, offs, *, store, machine, process, filament, base_flow=None, n
     labels = [flow_label(r) for r in ratios(base, offs)]
     header = "; FLOW_TEST: base flow ratio %s, patches (from the back left): %s\n" % (
         num(base), ", ".join("%s (%+g%%)" % (lab, o) for lab, o in zip(labels, offs)))
-    save_gcode(path, new_gcode, png, header)
+    save_gcode(path, new_gcode, png, header, box_start_lines(box_slot))
     return {"path": path, "patches": len(offs), "labels": labels, "base": base, "reordered": count,
             "temperature": nozzle_temp or qp.first(store.resolve("filament", filament).get("nozzle_temperature"))}

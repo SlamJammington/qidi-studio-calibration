@@ -34,6 +34,8 @@ Pick your printer, process and filament, choose a test tab, then click **Generat
 
 A good order is temperature, then flow, then retraction, each at the settings you found in the step before.
 
+If your printer has a QIDI Box, the flow and retraction tabs show its slots (read from the printer) under **Send to**, so you can pick which slot the test prints from, just like QIDI Studio's own slot picker.
+
 ## Reading the results
 
 **Temperature tower:** each 10 mm floor has a 45° and a 35° overhang, a bridge, two stringing cones and a couple of holes. Pick the floor that looks best overall. Hotter usually means stronger layers and more stringing. Cooler usually means cleaner overhangs and bridges.

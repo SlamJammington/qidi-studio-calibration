@@ -20,7 +20,7 @@ preview it, and printer_upload.py sends it to the printer.
 import project3mf
 import qidi_profiles as qp
 import tower_geometry as geo
-from sliced_gcode import END_MARK, START_MARK, body_extrusion, num as _num, save_gcode, slice_to_gcode  # noqa: F401
+from sliced_gcode import box_start_lines, END_MARK, START_MARK, body_extrusion, num as _num, save_gcode, slice_to_gcode  # noqa: F401
 
 TOWER_W = 14.0       # tower width (x); the band labels go on the left tower's front
 TOWER_D = 10.0       # tower depth (y)
@@ -155,7 +155,8 @@ def rewrite_retractions(gcode, values, band_h, reference):
 
 
 # ------------------------------------------------------------------ slicing
-def generate(path, values, *, store, machine, process, filament, band_h=5.0, nozzle_temp=None, progress=None):
+def generate(path, values, *, store, machine, process, filament, band_h=5.0, nozzle_temp=None, progress=None,
+             box_slot=None):
     """Slice the retraction test and write it as ready-to-print G-code.
 
     Returns a dict describing what was written.
@@ -191,6 +192,6 @@ def generate(path, values, *, store, machine, process, filament, band_h=5.0, noz
     header = ("; RETRACTION_TEST: %s mm, bands of %g mm, from the bottom: %s\n"
               % (" -> ".join(fmt(v) for v in (values[0], values[-1])), band_h,
                  ", ".join(fmt(v) for v in values)))
-    save_gcode(path, new_gcode, png, header)
+    save_gcode(path, new_gcode, png, header, box_start_lines(box_slot))
     return {"path": path, "bands": len(values), "height": height, "retractions": counts,
             "temperature": nozzle_temp or qp.first(f.get("nozzle_temperature"))}
