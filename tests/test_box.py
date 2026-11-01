@@ -43,7 +43,7 @@ type = PETG
 SAVED = {"filament_slot0": 7, "filament_slot1": 7, "filament_slot2": 7, "filament_slot3": 39,
          "color_slot0": 1, "color_slot1": 2, "color_slot2": 2, "color_slot3": 9,
          "vendor_slot0": 0, "vendor_slot1": 0, "vendor_slot2": 0, "vendor_slot3": 1,
-         "slot0": 0, "slot1": 1, "slot2": 1, "slot3": 1}
+         "slot0": 0, "slot1": 1, "slot2": 1, "slot3": 1, "enable_box": 1}
 RUNOUT = {0: 1, 1: 0, 2: 0, 3: 0}     # the sensor reads 1 when a slot is empty
 
 
@@ -95,6 +95,7 @@ class BoxTests(unittest.TestCase):
 
     def setUp(self):
         FakeKlipper.has_box = True
+        SAVED["enable_box"] = 1
 
     def test_reads_the_slots(self):
         slots = qb.read_box(self.printer)
@@ -124,6 +125,22 @@ class BoxTests(unittest.TestCase):
 
     def test_command_matches_qidi_studio(self):
         self.assertEqual(qb.select_slot_gcode(2), "SAVE_VARIABLE VARIABLE=value_t0 VALUE=\"'slot2'\"")
+        self.assertEqual(qb.enable_box_gcode(False), "SAVE_VARIABLE VARIABLE=enable_box VALUE=0")
+
+    def test_external_spool_is_preselected_after_an_external_print(self):
+        box = qb.read_box(self.printer)
+        self.assertTrue(box.enabled)
+        self.assertEqual(qb.default_choice(box, "PETG").number, 4)
+        SAVED["enable_box"] = 0
+        box = qb.read_box(self.printer)
+        self.assertFalse(box.enabled)
+        self.assertEqual(qb.default_choice(box, "PETG"), qb.EXTERNAL)
+
+    def test_start_lines(self):
+        self.assertEqual(qb.start_lines(None), [])
+        # A Box slot also switches the Box back on: an earlier print may have used the external spool.
+        self.assertEqual(qb.start_lines(2)[1:], [qb.enable_box_gcode(True), qb.select_slot_gcode(2)])
+        self.assertEqual(qb.start_lines(qb.EXTERNAL)[1:], [qb.enable_box_gcode(False)])
 
 
 class GcodeTests(unittest.TestCase):
@@ -132,11 +149,12 @@ class GcodeTests(unittest.TestCase):
                            "BOX_PRINT_START EXTRUDER=0 HOTENDTEMP=240", "T0", ""])
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "x.gcode")
-            save_gcode(path, gcode, start_lines=["; QIDI Box: print from slot 3", qb.select_slot_gcode(2)])
+            save_gcode(path, gcode, start_lines=qb.start_lines(2))
             with open(path, encoding="utf-8") as f:
                 lines = f.read().split("\n")
         i = lines.index(qb.select_slot_gcode(2))
-        self.assertEqual(lines[i - 2:i], ["; EXECUTABLE_BLOCK_START", "; QIDI Box: print from slot 3"])
+        self.assertEqual(lines[i - 3:i], ["; EXECUTABLE_BLOCK_START", "; QIDI Box: print from slot 3",
+                                          qb.enable_box_gcode(True)])
         self.assertLess(i, lines.index("BOX_PRINT_START EXTRUDER=0 HOTENDTEMP=240"))
 
     def test_test_pieces_carry_the_slot(self):
@@ -148,10 +166,16 @@ class GcodeTests(unittest.TestCase):
             rt.generate(out, [0.0, 1.0], store=store, box_slot=3, **PRESETS)
             with open(out, encoding="utf-8") as f:
                 with_slot = f.read()
+            rt.generate(out, [0.0, 1.0], store=store, box_slot=qb.EXTERNAL, **PRESETS)
+            with open(out, encoding="utf-8") as f:
+                external = f.read()
             rt.generate(out, [0.0, 1.0], store=store, **PRESETS)
             with open(out, encoding="utf-8") as f:
                 without = f.read()
         self.assertIn(qb.select_slot_gcode(3), with_slot)
+        self.assertIn(qb.enable_box_gcode(True), with_slot)
+        self.assertIn(qb.enable_box_gcode(False), external)
+        self.assertNotIn("value_t0", external)
         self.assertNotIn("SAVE_VARIABLE", without)
 
     def test_cli_option(self):
@@ -168,11 +192,17 @@ class GcodeTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             with open(out, encoding="utf-8") as f:
                 self.assertIn(qb.select_slot_gcode(3), f.read())
+            r = subprocess.run([sys.executable, "-c", code, "x", "--qidi-dir", FIXTURE, "--test", "retraction",
+                                "--end", "1", "--step", "1", "--box-slot", "ext", "-o", out],
+                               capture_output=True, text=True, env=env, cwd=ROOT, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(out, encoding="utf-8") as f:
+                self.assertIn(qb.enable_box_gcode(False), f.read())
             bad = subprocess.run([sys.executable, os.path.join(ROOT, "qidi_studio_calibration.py"), "--qidi-dir",
                                   FIXTURE, "--test", "retraction", "--box-slot", "0"], capture_output=True,
                                  text=True, env=env, timeout=60)
             self.assertEqual(bad.returncode, 1)
-            self.assertIn("--box-slot must be between 1 and 16", bad.stderr)
+            self.assertIn("--box-slot must be between 1 and 16, or 'ext'", bad.stderr)
 
 
 if __name__ == "__main__":

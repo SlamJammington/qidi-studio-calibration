@@ -15,7 +15,7 @@ import temp_tower as tt  # noqa: E402
 from studio import cli_command, open_in_studio, studio_command  # noqa: E402
 from tower_geometry import HERE as DATA_DIR  # noqa: E402
 
-__version__ = "1.2.4"
+__version__ = "1.2.5"
 APP_NAME = "QIDI Studio Calibration"
 NO_PRINTER = "(no network printer set up in QIDI Studio)"
 
@@ -111,8 +111,9 @@ def run_cli(argv):
     ap.add_argument("--send", nargs="?", const="", metavar="PRINTER",
                     help="retraction/flow: upload the G-code to a network printer saved in QIDI Studio "
                          "(default: the first)")
-    ap.add_argument("--box-slot", type=int, metavar="N",
-                    help="retraction/flow: print from QIDI Box slot N (1-16), the way QIDI Studio picks a slot")
+    ap.add_argument("--box-slot", metavar="N",
+                    help="retraction/flow: print from QIDI Box slot N (1-16), or 'ext' for the external spool, "
+                         "the way QIDI Studio picks a slot")
     ap.add_argument("--print-now", action="store_true",
                     help="retraction/flow: with --send, start printing once uploaded")
     ap.add_argument("--list", choices=["printer", "process", "filament"], help="list presets and exit")
@@ -141,9 +142,14 @@ def run_cli(argv):
 
     if a.test in ("retraction", "flow"):
         target = pick_network_printer(store, a.send) if a.send is not None else None
-        if a.box_slot is not None and not 1 <= a.box_slot <= 16:
-            raise ValueError("--box-slot must be between 1 and 16")
-        box_slot = a.box_slot - 1 if a.box_slot else None
+        box_slot = None
+        if a.box_slot is not None:
+            if a.box_slot.lower() in ("ext", "external"):
+                box_slot = qidi_box.EXTERNAL
+            elif a.box_slot.isdigit() and 1 <= int(a.box_slot) <= 16:
+                box_slot = int(a.box_slot) - 1
+            else:
+                raise ValueError("--box-slot must be between 1 and 16, or 'ext'")
         if a.test == "retraction":
             d_start, d_end, d_step = rt.defaults(store, machine)
             values = rt.lengths(pick(a.start, d_start), pick(a.end, d_end), pick(a.step, d_step))
@@ -468,7 +474,7 @@ def run_gui():
             if not slots:
                 frame.grid_remove()
                 continue
-            ttk.Label(frame, text="Print from QIDI Box slot:").grid(row=0, column=0, columnspan=4, sticky="w")
+            ttk.Label(frame, text="Print from:").grid(row=0, column=0, columnspan=4, sticky="w")
             for i, slot in enumerate(slots):
                 row, col = 1 + i // 2, (i % 2) * 2
                 swatch = tk.Label(frame, width=2, relief="solid", borderwidth=1,
@@ -478,22 +484,26 @@ def run_gui():
                 rb.grid(row=row, column=col + 1, sticky="w")
                 if not slot.loaded:
                     rb.state(["disabled"])
+            ttk.Radiobutton(frame, text="External spool (not through the Box)", variable=v["box_slot"],
+                            value=qidi_box.EXTERNAL).grid(row=2 + (len(slots) - 1) // 2, column=1,
+                                                          columnspan=3, pady=(2, 0), sticky="w")
             ttk.Button(frame, text="Refresh", command=refresh_box).grid(
                 row=1, column=4, rowspan=2, padx=(16, 0), sticky="n")
             frame.grid()
         if slots:
-            chosen = v["box_slot"].get()
-            if not any(str(s.index) == chosen and s.loaded for s in slots):
+            if box_choice() is None:
                 kind = ""
                 if store() and v["filament"].get():
                     kind = qp.first(store().resolve("filament", v["filament"].get()).get("filament_type"), "")
-                best = qidi_box.default_slot(slots, kind)
-                v["box_slot"].set(str(best.index) if best else "")
+                best = qidi_box.default_choice(slots, kind)
+                v["box_slot"].set(qidi_box.EXTERNAL if best == qidi_box.EXTERNAL else str(best.index) if best else "")
 
     def box_choice():
-        """The chosen Box slot (0-based), or None when there's no Box picker showing."""
+        """The chosen Box slot, qidi_box.EXTERNAL, or None when there's no Box picker showing."""
         slots = state.get("box") or []
         chosen = v["box_slot"].get()
+        if slots and chosen == qidi_box.EXTERNAL:
+            return qidi_box.EXTERNAL
         return next((s for s in slots if str(s.index) == chosen and s.loaded), None)
 
     def set_flow_range(start, end, step):
@@ -751,7 +761,7 @@ def run_gui():
                 return
         print_now = bool(target) and v_print_now.get()
         slot = box_choice()
-        slot_index = slot.index if slot else None
+        slot_index = slot if slot in (None, qidi_box.EXTERNAL) else slot.index
         state["busy"] = True
         update_buttons()
         # Slicing takes a while, so it runs on a worker thread. Tk may only be used from
@@ -761,7 +771,9 @@ def run_gui():
         def work():
             try:
                 summary = make(lambda msg: messages.put(("progress", msg)))
-                if slot:
+                if slot == qidi_box.EXTERNAL:
+                    summary += "\nPrints from the external spool, not the QIDI Box."
+                elif slot:
                     summary += "\nPrints from QIDI Box %s." % slot.describe().replace("Slot", "slot", 1)
                 if target:
                     messages.put(("progress", "Sending to %s…" % pu.describe(target)))

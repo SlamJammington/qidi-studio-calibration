@@ -115,7 +115,6 @@ def save_gcode(path, gcode, png=b"", header="", start_lines=()):
 
 
 def box_start_lines(box_slot):
-    """Start-of-print lines that make the test load from QIDI Box slot `box_slot` (0-based), or none."""
-    if box_slot is None:
-        return []
-    return ["; QIDI Box: print from slot %d" % (box_slot + 1), qidi_box.select_slot_gcode(box_slot)]
+    """Start-of-print lines that make the test load from QIDI Box slot `box_slot` (0-based),
+    the external spool (qidi_box.EXTERNAL), or none."""
+    return qidi_box.start_lines(box_slot)

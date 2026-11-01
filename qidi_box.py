@@ -3,10 +3,12 @@
 QIDI's Klipper firmware keeps the Box's slot contents in saved variables
 (filament_slotN, color_slotN, vendor_slotN are numbers into the printer's
 officiall_filas_list.cfg) and reports each slot's sensor live (runout_button is
-1 when the slot is empty). Tool Tn loads whatever slot value_tn names, which is
-how QIDI Studio picks a slot for a print: it sends
-    SAVE_VARIABLE VARIABLE=value_t0 VALUE="'slot2'"
-before the print starts. A test does the same at the top of its G-code.
+1 when the slot is empty). Two saved variables pick where a print loads from, and
+QIDI Studio sends them before each print starts:
+    SAVE_VARIABLE VARIABLE=enable_box VALUE=1          (0: the external spool)
+    SAVE_VARIABLE VARIABLE=value_t0 VALUE="'slot2'"    (tool T0 loads Box slot 2, 0-based)
+They stay set until the next print changes them, so a test sets them at the top of
+its G-code.
 """
 import configparser
 import json
@@ -18,6 +20,16 @@ import urllib.request
 import printer_upload as pu
 
 SLOTS_PER_BOX = 4
+EXTERNAL = "external"   # print from the spool on the printer, bypassing the Box
+
+
+class Box(list):
+    """A Box's slots, plus whether the printer is set to print from the Box (enable_box)
+    rather than the external spool."""
+
+    def __init__(self, slots, enabled=True):
+        super().__init__(slots)
+        self.enabled = enabled
 
 
 class Slot:
@@ -80,7 +92,7 @@ def local_filament_list():
 
 
 def read_box(printer, timeout=5):
-    """The Box slots of a QIDI Studio network printer, or None if it has no Box.
+    """The Box slots of a QIDI Studio network printer (a Box), or None if it has no Box.
 
     Raises OSError/ValueError if the printer can't be reached or doesn't answer like Klipper."""
     base = pu.base_url(printer)
@@ -108,7 +120,14 @@ def read_box(printer, timeout=5):
         material, kind = materials.get(saved.get("filament_slot%d" % index), ("", ""))
         slots.append(Slot(index, material, kind, colours.get(saved.get("color_slot%d" % index), ""),
                           vendors.get(saved.get("vendor_slot%d" % index), ""), loaded))
-    return slots
+    return Box(slots, enabled=saved.get("enable_box", 1) != 0)
+
+
+def default_choice(box, filament_type=""):
+    """What to preselect: the external spool if that's what the printer last used, else a Box slot."""
+    if not box.enabled:
+        return EXTERNAL
+    return default_slot(box, filament_type)
 
 
 def default_slot(slots, filament_type=""):
@@ -123,3 +142,18 @@ def default_slot(slots, filament_type=""):
 def select_slot_gcode(index, tool=0):
     """The line QIDI Studio sends to make tool `tool` load from Box slot `index` (0-based)."""
     return "SAVE_VARIABLE VARIABLE=value_t%d VALUE=\"'slot%d'\"" % (tool, index)
+
+
+def enable_box_gcode(enabled):
+    """The line QIDI Studio sends to print from the Box (True) or the external spool (False)."""
+    return "SAVE_VARIABLE VARIABLE=enable_box VALUE=%d" % (1 if enabled else 0)
+
+
+def start_lines(choice):
+    """Start-of-print lines that make a print load from `choice`: a Box slot (0-based),
+    EXTERNAL, or None to leave the printer as it is."""
+    if choice is None:
+        return []
+    if choice == EXTERNAL:
+        return ["; QIDI Box: print from the external spool", enable_box_gcode(False)]
+    return ["; QIDI Box: print from slot %d" % (choice + 1), enable_box_gcode(True), select_slot_gcode(choice)]
