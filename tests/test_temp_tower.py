@@ -6,9 +6,11 @@ import tempfile
 import unittest
 import zipfile
 import xml.etree.ElementTree as ET
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+import project3mf  # noqa: E402
 import qidi_profiles as qp  # noqa: E402
 import temp_tower as tt  # noqa: E402
 import tower_geometry as geo  # noqa: E402
@@ -166,6 +168,17 @@ class ThreeMFTests(unittest.TestCase):
         self.assertEqual(cfg["curr_bed_type"], "Textured PEI Plate")
         self.assertNotIn("inherits", cfg)
         self.assertNotIn("compatible_printers", cfg)
+
+    def test_printed_by_layer_even_if_the_preset_prints_by_object(self):
+        # QIDI Studio ignores the temperature changes when printing one object at a time.
+        real = project3mf.project_config
+        by_object = lambda *a: dict(real(*a), print_sequence="by object")  # noqa: E731
+        path = os.path.join(self.tmp.name, "by object.3mf")
+        with mock.patch.object(project3mf, "project_config", by_object):
+            tt.write_3mf(path, self.temps, store=self.store, machine="My Printer",
+                         process="0.20mm Standard @Test", filament="My PLA")
+        with zipfile.ZipFile(path) as z:
+            self.assertEqual(json.loads(z.read("Metadata/project_settings.config"))["print_sequence"], "by layer")
 
     def test_too_tall(self):
         with self.assertRaises(ValueError):

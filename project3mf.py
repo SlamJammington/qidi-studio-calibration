@@ -255,6 +255,9 @@ def write_project(path, parts=None, *, center, objects=None, store=None, machine
         z.writestr("Metadata/slice_info.config", slice_info)
         if embed_settings and store and machine and process and filament:
             cfg = project_config(store, machine, process, filament)
+            # The tests change things per layer. QIDI Studio drops per-layer G-code
+            # from projects printed one object at a time, so always print by layer.
+            cfg["print_sequence"] = "by layer"
             cfg.update(config_overrides or {})
             z.writestr("Metadata/project_settings.config", json.dumps(cfg, indent=4, ensure_ascii=False))
     os.replace(tmp, path)

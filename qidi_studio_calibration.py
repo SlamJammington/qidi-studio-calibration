@@ -15,7 +15,7 @@ import temp_tower as tt  # noqa: E402
 from studio import cli_command, open_in_studio, studio_command  # noqa: E402
 from tower_geometry import HERE as DATA_DIR  # noqa: E402
 
-__version__ = "1.2.3"
+__version__ = "1.2.4"
 APP_NAME = "QIDI Studio Calibration"
 NO_PRINTER = "(no network printer set up in QIDI Studio)"
 
