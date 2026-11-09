@@ -6,19 +6,27 @@ import sys
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import app_settings  # noqa: E402
 import qidi_profiles as qp  # noqa: E402
 import printer_upload as pu  # noqa: E402
 import flow_test as ft  # noqa: E402
 import qidi_box  # noqa: E402
 import retraction_test as rt  # noqa: E402
+import start_menu  # noqa: E402
 import temp_tower as tt  # noqa: E402
 import updater  # noqa: E402
 from studio import cli_command, open_in_studio, studio_command  # noqa: E402
 from tower_geometry import HERE as DATA_DIR  # noqa: E402
 
-__version__ = "1.2.6"
+__version__ = "1.2.7"
 APP_NAME = "QIDI Studio Calibration"
 NO_PRINTER = "(no network printer set up in QIDI Studio)"
+TAB_NAMES = ("temperature", "flow", "retraction")
+PRESET_FIELDS = ("printer", "process", "filament")
+# Remembered between runs. "Start printing right away" and the Box slot aren't: the first
+# shouldn't come back by itself, and the second is read from the printer as it is now.
+NUMBER_FIELDS = ("start", "end", "step", "r_start", "r_end", "r_step", "r_band", "r_temp",
+                 "f_start", "f_end", "f_step", "f_base", "f_temp", "c_offset")
 
 def filament_defaults(store, filament):
     """(start, end, step) suggested from the filament's recommended range, hottest at the bottom."""
@@ -85,11 +93,11 @@ def pick_network_printer(store, name=None):
 
 
 # ---------------------------------------------------------------------- CLI
-def run_update():
+def run_update(check_only=False):
     release = updater.latest_release(__version__)
     if not updater.is_newer(release.version, __version__):
         print("You have the newest version (%s)." % __version__)
-    elif not updater.can_replace():
+    elif check_only or not updater.can_replace():
         print("Version %s is available (you have %s): %s" % (release.version, __version__, updater.RELEASES_PAGE))
     else:
         print("Updated to %s: %s" % (release.version, updater.install(release, __version__, progress=print)))
@@ -105,6 +113,7 @@ def run_cli(argv):
     ap = argparse.ArgumentParser(prog="qidi_studio_calibration", description=__doc__)
     ap.add_argument("--version", action="version", version="%(prog)s " + __version__)
     ap.add_argument("--update", action="store_true", help="update this app to the newest release, then exit")
+    ap.add_argument("--check-update", action="store_true", help="say whether a newer release exists, then exit")
     ap.add_argument("--test", choices=["temperature", "retraction", "flow"], default="temperature",
                     help="which test to make (default: temperature)")
     ap.add_argument("--qidi-dir", help="QIDI Studio data folder (default: %s)" % qp.default_root().replace("%", "%%"))
@@ -134,8 +143,8 @@ def run_cli(argv):
     ap.add_argument("-o", "--output", help="output file")
     ap.add_argument("--cli", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
-    if a.update:
-        return run_update()
+    if a.update or a.check_update:
+        return run_update(check_only=a.check_update)
 
     store = qp.PresetStore(a.qidi_dir)
     sel_m, sel_p, sel_f = store.selected()
@@ -221,17 +230,22 @@ def run_gui():
         pass
     root.minsize(560, 0)
 
-    state = {"store": None, "busy": False, "printers": []}
+    saved = app_settings.load()
+    out_dir = saved.get("out_dir")
+    state = {"store": None, "busy": False, "printers": [],
+             "out_dir": out_dir if isinstance(out_dir, str) and os.path.isdir(out_dir) else None}
     v = {k: tk.StringVar() for k in ("dir", "printer", "process", "filament", "info",
                                      "start", "end", "step", "summary", "output",
                                      "r_start", "r_end", "r_step", "r_band", "r_temp", "r_summary", "r_output",
                                      "r_send", "f_start", "f_end", "f_step", "f_base", "f_temp", "f_summary",
                                      "f_output", "c_offset", "c_result", "box_slot")}
-    v_wait = tk.BooleanVar(value=False)
-    v_embed = tk.BooleanVar(value=True)
-    v_all = tk.BooleanVar(value=False)
+    v_wait = tk.BooleanVar(value=saved.get("wait") is True)
+    v_embed = tk.BooleanVar(value=saved.get("embed") is not False)
+    v_all = tk.BooleanVar(value=saved.get("all_presets") is True)
     v_print_now = tk.BooleanVar(value=False)
-    v["dir"].set(qp.default_root())
+    v_check_updates = tk.BooleanVar(value=saved.get("check_updates") is not False)
+    saved_dir = saved.get("dir")
+    v["dir"].set(saved_dir if isinstance(saved_dir, str) and os.path.isdir(saved_dir) else qp.default_root())
     v["step"].set("5")
     v["r_band"].set("5")
     v["f_start"].set("-20")
@@ -408,8 +422,6 @@ def run_gui():
         "It's worked out from the current flow above.")).grid(row=9, column=1, columnspan=2, sticky="w")
     v["c_offset"].set("0")
 
-    update_btn = ttk.Button(frm, text="Check for updates", command=lambda: check_for_updates())
-    update_btn.grid(row=row, column=0, columnspan=3, sticky="w", pady=(10, 0))
     btns = ttk.Frame(frm)
     btns.grid(row=row, column=0, columnspan=3, sticky="e", pady=(10, 0))
     gen_btn = ttk.Button(btns, text="Generate", command=lambda: generate(None))
@@ -421,6 +433,21 @@ def run_gui():
     row += 1
     ttk.Label(frm, textvariable=status, wraplength=620, justify="left").grid(
         row=row, column=0, columnspan=3, sticky="w", pady=(10, 0))
+    row += 1
+
+    footer = ttk.Frame(frm)
+    footer.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+    footer.columnconfigure(3, weight=1)
+    update_btn = ttk.Button(footer, text="Check for updates", command=lambda: check_for_updates())
+    update_btn.grid(row=0, column=0)
+    menu_btn = ttk.Button(footer, text=start_menu.button_text(), command=lambda: add_to_menu())
+    menu_btn.grid(row=0, column=1, padx=(6, 0))
+    if not start_menu.available() or start_menu.is_added():
+        menu_btn.grid_remove()
+    update_note = tk.StringVar()
+    ttk.Label(footer, textvariable=update_note, font=("TkDefaultFont", 10, "bold")).grid(
+        row=0, column=2, padx=(10, 0))
+    ttk.Checkbutton(footer, text="Check at startup", variable=v_check_updates).grid(row=0, column=4, sticky="e")
 
     auto = {"output": "", "r_output": "", "f_output": ""}
 
@@ -428,7 +455,7 @@ def run_gui():
         return state["store"]
 
     def current_tab():
-        return ("temperature", "flow", "retraction")[tabs.index(tabs.select())]
+        return TAB_NAMES[tabs.index(tabs.select())]
 
     def sliced_tab():
         return current_tab() != "temperature"
@@ -690,6 +717,8 @@ def run_gui():
         return 0
 
     def auto_output(key, path):
+        if state["out_dir"]:
+            path = os.path.join(state["out_dir"], os.path.basename(path))
         if not v[key].get() or v[key].get() == auto[key]:
             auto[key] = path
             v[key].set(path)
@@ -755,6 +784,53 @@ def run_gui():
         if p:
             v[key].set(os.path.normpath(p))
 
+    def save_settings():
+        st = store()
+        values = {k: v[k].get() for k in PRESET_FIELDS + NUMBER_FIELDS + ("dir", "r_send")}
+        values.update(wait=v_wait.get(), embed=v_embed.get(), all_presets=v_all.get(),
+                      check_updates=v_check_updates.get(), tab=current_tab(), out_dir=state["out_dir"],
+                      preset_numbers=repr(preset_numbers(st)) if st else None)
+        app_settings.save(values)
+
+    def restore_settings():
+        """Go back to the last run's choices, where they still exist. The numbers only come back if
+        the same presets were found and still suggest the same numbers, as in reload_presets."""
+        if not saved:
+            return
+
+        def choose(var, combo, name):
+            if isinstance(name, str) and name in root.tk.splitlist(combo["values"]):
+                var.set(name)
+
+        st = store()
+        if st:
+            choose(v["printer"], combos["printer"], saved.get("printer"))
+            fill_lists()
+            choose(v["process"], combos["process"], saved.get("process"))
+            choose(v["filament"], combos["filament"], saved.get("filament"))
+            apply_retraction_defaults()
+            on_filament()
+            if (all(saved.get(k) == v[k].get() for k in PRESET_FIELDS)
+                    and saved.get("preset_numbers") == repr(preset_numbers(st))):
+                for key in NUMBER_FIELDS:
+                    if isinstance(saved.get(key), str):
+                        v[key].set(saved[key])
+                update_summaries()
+            before = v["r_send"].get()
+            if send_combos:
+                choose(v["r_send"], send_combos[0], saved.get("r_send"))
+            if v["r_send"].get() != before:
+                refresh_box()
+        if saved.get("tab") in TAB_NAMES:
+            tabs.select(TAB_NAMES.index(saved["tab"]))
+        update_buttons()
+
+    def close_window():
+        try:
+            save_settings()
+        finally:
+            root.destroy()
+
     def in_background(work, done):
         """Run work(say) on a worker thread, then done(result, error) here. Tk may only be used
         from this thread, so the worker reports through a queue that the window polls."""
@@ -786,6 +862,56 @@ def run_gui():
     def offer_download_page(message):
         if messagebox.askyesno(APP_NAME, message):
             webbrowser.open(updater.RELEASES_PAGE)
+
+    def check_at_startup():
+        """Quietly look for a newer version. Being offline or rate limited isn't worth a message."""
+        def work(say):
+            try:
+                release = updater.latest_release(__version__)
+                return release.version if updater.is_newer(release.version, __version__) else None
+            except Exception:  # noqa: BLE001
+                return None
+
+        def checked(version, error):
+            if version:
+                update_note.set("Version %s is available" % version)
+                update_btn.config(text="Update now")
+
+        in_background(work, checked)
+
+    def add_to_menu():
+        running_from = os.path.abspath(sys.executable)
+        menu = start_menu.menu_name()
+        menu_btn.state(["disabled"])
+        status.set("Adding to the %s…" % menu)
+
+        def added(path, error):
+            menu_btn.state(["!disabled"])
+            status.set("")
+            if error:
+                messagebox.showerror(APP_NAME, "Couldn't add the app to the %s:\n%s" % (menu, error))
+                return
+            if start_menu.is_added():
+                menu_btn.grid_remove()
+                status.set("Added to the %s." % menu)
+            elif state["busy"]:
+                status.set("Added to the %s. Start it from there next time." % menu)
+            elif messagebox.askyesno(APP_NAME, "Added to the %s, which starts a copy of the app in\n%s\n\nYou can "
+                                     "delete the file you ran this from (%s).\n\nSwitch to the copy now?"
+                                     % (menu, os.path.dirname(path), running_from)):
+                save_settings()
+                try:
+                    updater.relaunch(path)
+                except OSError as e:
+                    messagebox.showerror(APP_NAME, "Couldn't start it (%s). Start it from the %s instead."
+                                         % (e, menu))
+                    return
+                root.destroy()
+            else:
+                status.set("Added to the %s. Start it from there next time." % menu)
+
+        icon = os.path.join(DATA_DIR, "assets", "icon.png")
+        in_background(lambda say: start_menu.add(icon_source=icon), added)
 
     def check_for_updates():
         status.set("Checking for updates…")
@@ -823,6 +949,7 @@ def run_gui():
                 offer_download_page("The update failed, so this version is unchanged:\n%s\n\n"
                                     "Open the download page instead?" % error)
                 return
+            save_settings()
             try:
                 updater.relaunch(path)
             except OSError as e:
@@ -839,6 +966,12 @@ def run_gui():
             status.set("")
             messagebox.showerror(APP_NAME, error)
             return
+        # Keep saving to a folder the user picked; otherwise follow QIDI Studio's own default.
+        folder = os.path.normpath(os.path.dirname(os.path.abspath(out)))
+        same = store() and folder == os.path.normpath(default_output_dir(store()))
+        state["out_dir"] = None if same else folder
+        update_summaries()
+        save_settings()
         status.set(message)
         if open_after:
             try:
@@ -967,7 +1100,11 @@ def run_gui():
     for key in ("c_offset", "f_base"):
         v[key].trace_add("write", lambda *_: update_calculator())
     load_store()
+    restore_settings()
     update_buttons()
+    root.protocol("WM_DELETE_WINDOW", close_window)
+    if v_check_updates.get():
+        check_at_startup()
     root.mainloop()
 
 

@@ -28,7 +28,11 @@ The apps aren't code-signed, so your system will warn you the first time. On Win
 
 The retraction and flow rate tests need QIDI Studio installed on the same computer, because the app uses it to slice them.
 
-To update later, click **Check for updates** in the app. On Windows and Linux it replaces itself with the newest version and restarts. On macOS it opens the download page.
+To start it more easily, click **Add to Start menu** in the app (**Add to app menu** on Linux). This puts a copy of the app in `%LOCALAPPDATA%\Programs\QIDI Studio Calibration` (`~/.local/share/qidi-studio-calibration` on Linux) and adds a shortcut to it. To remove it, delete the shortcut and that folder.
+
+The app asks GitHub for the newest version each time it starts, and shows a notice if there is one. Untick **Check at startup** to turn that off. To update, click **Update now** or **Check for updates**. On Windows and Linux it replaces itself with the newest version and restarts. On macOS it opens the download page.
+
+The app remembers your presets, numbers and save folder for next time. If a preset has since changed or gone, it goes back to the values that preset suggests.
 
 ## Using it
 

@@ -70,6 +70,8 @@ jobs:
           esac
           "$bin" --version | tee version.txt
           grep -qF "$VERSION" version.txt
+          # Can the built app reach GitHub for updates? Only a warning: GitHub limits these requests.
+          "$bin" --check-update || echo "::warning::$RUNNER_OS build couldn't check for updates"
           if [ "$RUNNER_OS" = Windows ]; then
             # The version is also in the EXE's properties (Properties → Details).
             powershell -NoProfile -Command "(Get-Item '$bin').VersionInfo.ProductVersion" | tee file_version.txt
