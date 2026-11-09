@@ -122,6 +122,10 @@ class LinuxTests(MenuTestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "Windows shortcut")
 class WindowsTests(MenuTestCase):
+    def assertSamePath(self, a, b):  # noqa: N802
+        # Windows may write a shortened folder name (RUNNER~1) out in full in the shortcut.
+        self.assertEqual(os.path.normcase(os.path.realpath(a)), os.path.normcase(os.path.realpath(b)))
+
     def read_shortcut(self):
         script = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
                   "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:QSC_LINK); "
@@ -137,14 +141,16 @@ class WindowsTests(MenuTestCase):
         self.assertEqual(target, os.path.join(os.environ["LOCALAPPDATA"], "Programs", "QIDI Studio Calibration",
                                               "QidiStudioCalibration.exe"))
         link = self.read_shortcut()
-        self.assertEqual(link["target"], target)
-        self.assertEqual(link["folder"], os.path.dirname(target))
-        self.assertEqual(link["icon"], target + ",0")
+        self.assertSamePath(link["target"], target)
+        self.assertSamePath(link["folder"], os.path.dirname(target))
+        icon, index = link["icon"].rsplit(",", 1)
+        self.assertSamePath(icon, target)
+        self.assertEqual(index, "0")
 
     def test_awkward_characters_in_the_path(self):
         os.environ["LOCALAPPDATA"] = os.path.join(self.tmp.name, "O'Brien $HOME & co (é)")
         target = sm.add(self.exe)
-        self.assertEqual(self.read_shortcut()["target"], target)
+        self.assertSamePath(self.read_shortcut()["target"], target)
 
     def test_shortcut_failure_is_reported(self):
         with mock.patch.dict(os.environ, {"SystemRoot": os.path.join(self.tmp.name, "nowhere")}), \
