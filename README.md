@@ -20,13 +20,15 @@ Get the latest version from the [Releases page](https://github.com/SlamJammingto
 
 | System | File | How to start it |
 |---|---|---|
-| Windows 10/11 | `QidiStudioCalibration-windows.exe` | Double-click it. Nothing to install. |
-| macOS (Apple silicon) | `QidiStudioCalibration-macos.zip` | Unzip, then right-click **QidiStudioCalibration** → **Open** the first time. |
-| Linux (x86-64) | `QidiStudioCalibration-linux.tar.gz` | Extract, then run `./QidiStudioCalibration`. |
+| Windows 10/11 | `QidiStudioCalibration-<version>-windows.exe` | Double-click it. Nothing to install. |
+| macOS (Apple silicon) | `QidiStudioCalibration-<version>-macos.zip` | Unzip, then right-click **QidiStudioCalibration** → **Open** the first time. |
+| Linux (x86-64) | `QidiStudioCalibration-<version>-linux.tar.gz` | Extract, then run `./QidiStudioCalibration`. |
 
 The apps aren't code-signed, so your system will warn you the first time. On Windows, click **More info → Run anyway**. On macOS, right-click → **Open**.
 
 The retraction and flow rate tests need QIDI Studio installed on the same computer, because the app uses it to slice them.
+
+To update later, click **Check for updates** in the app. On Windows and Linux it replaces itself with the newest version and restarts. On macOS it opens the download page.
 
 ## Using it
 

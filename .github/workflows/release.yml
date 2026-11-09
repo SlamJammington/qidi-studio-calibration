@@ -18,13 +18,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Release files are named QidiStudioCalibration-<version>-<suffix>.
         include:
           - os: windows-latest
-            asset: QidiStudioCalibration-windows.exe
+            suffix: windows.exe
           - os: macos-latest
-            asset: QidiStudioCalibration-macos.zip
+            suffix: macos.zip
           - os: ubuntu-latest
-            asset: QidiStudioCalibration-linux.tar.gz
+            suffix: linux.tar.gz
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -37,15 +38,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Tag must match __version__
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Version and file name
         shell: bash
         run: |
           v=$(python -c "import qidi_studio_calibration as q; print(q.__version__)")
-          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+          if [[ "$GITHUB_REF" == refs/tags/* && "v$v" != "$GITHUB_REF_NAME" ]]; then
             echo "::error::Tag $GITHUB_REF_NAME doesn't match __version__ = $v in qidi_studio_calibration.py"
             exit 1
           fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "ASSET=QidiStudioCalibration-$v-${{ matrix.suffix }}" >> "$GITHUB_ENV"
 
       - name: Tests
         run: python -m unittest discover -s tests -v
@@ -67,7 +69,12 @@ jobs:
             *)       bin=dist/QidiStudioCalibration ;;
           esac
           "$bin" --version | tee version.txt
-          grep -q "$(python -c 'import qidi_studio_calibration as q; print(q.__version__)')" version.txt
+          grep -qF "$VERSION" version.txt
+          if [ "$RUNNER_OS" = Windows ]; then
+            # The version is also in the EXE's properties (Properties → Details).
+            powershell -NoProfile -Command "(Get-Item '$bin').VersionInfo.ProductVersion" | tee file_version.txt
+            grep -qxF "$VERSION" <(tr -d '\r' < file_version.txt)
+          fi
           "$bin" --qidi-dir tests/fixtures/QIDIStudio -o smoke.3mf
           python -c "import zipfile; z = zipfile.ZipFile('smoke.3mf'); assert 'Metadata/custom_gcode_per_layer.xml' in z.namelist(); print('3MF ok')"
 
@@ -76,21 +83,21 @@ jobs:
         run: |
           cd dist
           case "$RUNNER_OS" in
-            Windows) mv QidiStudioCalibration.exe "${{ matrix.asset }}" ;;
-            macOS)   ditto -c -k --keepParent QidiStudioCalibration.app "${{ matrix.asset }}" ;;
-            *)       tar -czf "${{ matrix.asset }}" QidiStudioCalibration ;;
+            Windows) mv QidiStudioCalibration.exe "$ASSET" ;;
+            macOS)   ditto -c -k --keepParent QidiStudioCalibration.app "$ASSET" ;;
+            *)       tar -czf "$ASSET" QidiStudioCalibration ;;
           esac
 
       - name: Record build provenance
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist/${{ matrix.asset }}
+          subject-path: dist/${{ env.ASSET }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
+          name: ${{ env.ASSET }}
+          path: dist/${{ env.ASSET }}
           if-no-files-found: error
 
   release:

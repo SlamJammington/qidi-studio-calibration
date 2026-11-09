@@ -12,10 +12,11 @@ import flow_test as ft  # noqa: E402
 import qidi_box  # noqa: E402
 import retraction_test as rt  # noqa: E402
 import temp_tower as tt  # noqa: E402
+import updater  # noqa: E402
 from studio import cli_command, open_in_studio, studio_command  # noqa: E402
 from tower_geometry import HERE as DATA_DIR  # noqa: E402
 
-__version__ = "1.2.5"
+__version__ = "1.2.6"
 APP_NAME = "QIDI Studio Calibration"
 NO_PRINTER = "(no network printer set up in QIDI Studio)"
 
@@ -84,6 +85,17 @@ def pick_network_printer(store, name=None):
 
 
 # ---------------------------------------------------------------------- CLI
+def run_update():
+    release = updater.latest_release(__version__)
+    if not updater.is_newer(release.version, __version__):
+        print("You have the newest version (%s)." % __version__)
+    elif not updater.can_replace():
+        print("Version %s is available (you have %s): %s" % (release.version, __version__, updater.RELEASES_PAGE))
+    else:
+        print("Updated to %s: %s" % (release.version, updater.install(release, __version__, progress=print)))
+    return 0
+
+
 def run_cli(argv):
     for stream in (sys.stdout, sys.stderr):
         try:  # a preset name the console's code page can't show shouldn't crash the listing
@@ -92,6 +104,7 @@ def run_cli(argv):
             pass
     ap = argparse.ArgumentParser(prog="qidi_studio_calibration", description=__doc__)
     ap.add_argument("--version", action="version", version="%(prog)s " + __version__)
+    ap.add_argument("--update", action="store_true", help="update this app to the newest release, then exit")
     ap.add_argument("--test", choices=["temperature", "retraction", "flow"], default="temperature",
                     help="which test to make (default: temperature)")
     ap.add_argument("--qidi-dir", help="QIDI Studio data folder (default: %s)" % qp.default_root().replace("%", "%%"))
@@ -121,6 +134,8 @@ def run_cli(argv):
     ap.add_argument("-o", "--output", help="output file")
     ap.add_argument("--cli", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
+    if a.update:
+        return run_update()
 
     store = qp.PresetStore(a.qidi_dir)
     sel_m, sel_p, sel_f = store.selected()
@@ -189,8 +204,10 @@ def run_gui():
     import queue
     import threading
     import tkinter as tk
+    import webbrowser
     from tkinter import ttk, filedialog, messagebox
 
+    updater.clean_up_old()
     try:  # crisp text on high-DPI Windows displays
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -204,7 +221,7 @@ def run_gui():
         pass
     root.minsize(560, 0)
 
-    state = {"store": None, "busy": False}
+    state = {"store": None, "busy": False, "printers": []}
     v = {k: tk.StringVar() for k in ("dir", "printer", "process", "filament", "info",
                                      "start", "end", "step", "summary", "output",
                                      "r_start", "r_end", "r_step", "r_band", "r_temp", "r_summary", "r_output",
@@ -255,7 +272,8 @@ def run_gui():
     combos = {}
     for key, text in (("printer", "Printer"), ("process", "Process"), ("filament", "Filament")):
         label(frm, text, row)
-        cb = ttk.Combobox(frm, textvariable=v[key], state="readonly", height=25)
+        cb = ttk.Combobox(frm, textvariable=v[key], state="readonly", height=25,
+                          postcommand=lambda: reload_presets())
         cb.grid(row=row, column=1, columnspan=2, sticky="ew", pady=3)
         combos[key] = cb
         row += 1
@@ -332,7 +350,8 @@ def run_gui():
         ttk.Label(parent, text="Send to").grid(row=r, column=0, sticky="nw", padx=(0, 8), pady=(5, 3))
         box = ttk.Frame(parent)
         box.grid(row=r, column=1, columnspan=2, sticky="w")
-        combo = ttk.Combobox(box, textvariable=v["r_send"], state="readonly", width=30)
+        combo = ttk.Combobox(box, textvariable=v["r_send"], state="readonly", width=30,
+                             postcommand=lambda: reload_presets())
         combo.grid(row=0, column=0, sticky="w")
         send_combos.append(combo)
         combo.bind("<<ComboboxSelected>>", lambda e: (refresh_box(), update_buttons()))
@@ -389,6 +408,8 @@ def run_gui():
         "It's worked out from the current flow above.")).grid(row=9, column=1, columnspan=2, sticky="w")
     v["c_offset"].set("0")
 
+    update_btn = ttk.Button(frm, text="Check for updates", command=lambda: check_for_updates())
+    update_btn.grid(row=row, column=0, columnspan=3, sticky="w", pady=(10, 0))
     btns = ttk.Frame(frm)
     btns.grid(row=row, column=0, columnspan=3, sticky="e", pady=(10, 0))
     gen_btn = ttk.Button(btns, text="Generate", command=lambda: generate(None))
@@ -428,7 +449,8 @@ def run_gui():
             send_btn.grid_remove()
 
     def load_network_printers():
-        names = [p.get("name", "?") for p in network_printers()]
+        state["printers"] = network_printers()
+        names = [p.get("name", "?") for p in state["printers"]]
         if v["r_send"].get() not in names:
             v["r_send"].set(names[0] if names else NO_PRINTER)
         for combo in send_combos:
@@ -554,7 +576,54 @@ def run_gui():
         status.set("Loaded %d printer, %d process and %d filament presets from %s" % (
             len(machines), len(st.names("process")), len(st.names("filament")), st.root))
 
+    def preset_numbers(st):
+        """What the selected presets put in the number fields, to notice when that changes."""
+        m, f = v["printer"].get(), v["filament"].get()
+        if not st.get("machine", m) or not st.get("filament", f):
+            return None
+        return (filament_defaults(st, f), st.resolve("filament", f).get("nozzle_temperature"),
+                ft.preset_flow(st, f), rt.defaults(st, m), rt.preset_retraction(st, m, f))
+
+    def reload_presets(apply_defaults=True):
+        """Read the presets again, so changes made in QIDI Studio show up without a restart.
+
+        What's typed in the number fields stays, unless the selected presets now suggest different
+        numbers and apply_defaults is on. Returns whether the selection had to change because a
+        selected preset is gone."""
+        old = store()
+        if not old:
+            if os.path.isdir(v["dir"].get().strip()):
+                load_store()
+            return False
+        chosen = [v[k].get() for k in ("printer", "process", "filament")]
+        numbers = preset_numbers(old)
+        try:
+            state["store"] = st = qp.PresetStore(old.root)
+        except Exception:  # noqa: BLE001  (the folder went away: keep what's loaded)
+            return False
+        machines = st.names("machine")
+        combos["printer"]["values"] = machines
+        if v["printer"].get() not in machines:
+            v["printer"].set(machines[0] if machines else "")
+        fill_lists()
+        changed = chosen != [v[k].get() for k in ("printer", "process", "filament")]
+        if changed or (apply_defaults and preset_numbers(st) != numbers):
+            apply_retraction_defaults()
+            on_filament()
+        else:
+            show_filament_info()
+        # Not while generating: looking for the QIDI Box again would drop the chosen slot.
+        if apply_defaults and st.network_printers() != state["printers"]:
+            load_network_printers()
+            update_buttons()
+        return changed
+
     def refresh_lists(prefer_process=None, prefer_filament=None):
+        fill_lists(prefer_process, prefer_filament)
+        apply_retraction_defaults()
+        on_filament()
+
+    def fill_lists(prefer_process=None, prefer_filament=None):
         st = store()
         if not st:
             return
@@ -569,10 +638,8 @@ def run_gui():
             if cur not in names:
                 cur = names[0] if names else ""
             v[key].set(cur)
-        apply_retraction_defaults()
-        on_filament()
 
-    def on_filament(_e=None):
+    def show_filament_info():
         st = store()
         f = v["filament"].get()
         if not st or not f:
@@ -583,6 +650,14 @@ def run_gui():
             qp.first(cfg.get("filament_type"), "?"), qp.first(cfg.get("nozzle_temperature_range_low"), "?"),
             qp.first(cfg.get("nozzle_temperature_range_high"), "?"), qp.first(cfg.get("nozzle_temperature"), "?"),
             rt.fmt(rt.preset_retraction(st, v["printer"].get(), f)) if v["printer"].get() else "?"))
+
+    def on_filament(_e=None):
+        show_filament_info()
+        st = store()
+        f = v["filament"].get()
+        if not st or not f:
+            return
+        cfg = st.resolve("filament", f)
         v["r_temp"].set(str(int(qp.as_float(cfg.get("nozzle_temperature"), 210))))
         v["f_temp"].set(v["r_temp"].get())
         v["f_base"].set(fmt_flow(ft.preset_flow(st, f)))
@@ -680,6 +755,83 @@ def run_gui():
         if p:
             v[key].set(os.path.normpath(p))
 
+    def in_background(work, done):
+        """Run work(say) on a worker thread, then done(result, error) here. Tk may only be used
+        from this thread, so the worker reports through a queue that the window polls."""
+        messages = queue.Queue()
+
+        def run():
+            try:
+                messages.put(("done", work(lambda msg: messages.put(("progress", msg)))))
+            except Exception as e:  # noqa: BLE001
+                traceback.print_exc()
+                messages.put(("error", e))
+
+        def poll():
+            try:
+                while True:
+                    kind, value = messages.get_nowait()
+                    if kind == "progress":
+                        status.set(value)
+                    elif kind == "done":
+                        return done(value, None)
+                    else:
+                        return done(None, value)
+            except queue.Empty:
+                root.after(100, poll)
+
+        threading.Thread(target=run, daemon=True).start()
+        poll()
+
+    def offer_download_page(message):
+        if messagebox.askyesno(APP_NAME, message):
+            webbrowser.open(updater.RELEASES_PAGE)
+
+    def check_for_updates():
+        status.set("Checking for updates…")
+        update_btn.state(["disabled"])
+
+        def checked(release, error):
+            update_btn.state(["!disabled"])
+            status.set("")
+            if error:
+                offer_download_page("Couldn't check for updates:\n%s\n\nOpen the download page instead?" % error)
+            elif not updater.is_newer(release.version, __version__):
+                status.set("You have the newest version (%s)." % __version__)
+            elif not updater.can_replace():
+                offer_download_page("Version %s is available (you have %s).\n\nOpen the download page?"
+                                    % (release.version, __version__))
+            elif state["busy"]:
+                status.set("Version %s is available. Check again when this test has finished." % release.version)
+            elif messagebox.askyesno(APP_NAME, "Version %s is available (you have %s).\n\nDownload it, replace "
+                                     "this file and restart the app?" % (release.version, __version__)):
+                install_update(release)
+
+        in_background(lambda say: updater.latest_release(__version__), checked)
+
+    def install_update(release):
+        state["busy"] = True
+        update_buttons()
+        update_btn.state(["disabled"])
+
+        def installed(path, error):
+            if error:
+                state["busy"] = False
+                update_buttons()
+                update_btn.state(["!disabled"])
+                status.set("")
+                offer_download_page("The update failed, so this version is unchanged:\n%s\n\n"
+                                    "Open the download page instead?" % error)
+                return
+            try:
+                updater.relaunch(path)
+            except OSError as e:
+                messagebox.showerror(APP_NAME, "Updated to %s, but it couldn't be restarted (%s). "
+                                     "Start it yourself: %s" % (release.version, e, path))
+            root.destroy()
+
+        in_background(lambda say: updater.install(release, __version__, progress=say), installed)
+
     def finish(out, message, error, open_after):
         state["busy"] = False
         update_buttons()
@@ -697,6 +849,10 @@ def run_gui():
     def generate(action):
         """action: None (just save), "open" (open in QIDI Studio) or "send" (upload to the printer)."""
         open_after = action == "open"
+        if reload_presets(apply_defaults=False):  # edits made in QIDI Studio since the last read count too
+            messagebox.showerror(APP_NAME, "A preset you had selected is gone from QIDI Studio, so another one "
+                                 "was selected. Check the selection and generate again.")
+            return
         st = store()
         if not st:
             messagebox.showerror(APP_NAME, "QIDI Studio presets are not loaded.")
